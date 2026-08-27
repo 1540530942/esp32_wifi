@@ -10,11 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: espressif/install-esp-idf@v1
-        with:
-          version: v5.5.4
       - name: Build
-        working-directory: esp32_wifi_impl
-        run: |
-          idf.py set-target esp32s3
-          idf.py build
+        uses: docker://espressif/idf:v5.5.4
+        with:
+          args: bash -lc "cd $GITHUB_WORKSPACE/esp32_wifi_impl && idf.py set-target esp32s3 && idf.py build"
