@@ -1,0 +1,20 @@
+name: Build ESP32-S3 firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: espressif/install-esp-idf@v1
+        with:
+          version: v5.5.4
+      - name: Build
+        working-directory: esp32_wifi_impl
+        run: |
+          idf.py set-target esp32s3
+          idf.py build
