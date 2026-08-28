@@ -12,7 +12,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "cJSON.h"
-#include <cstring>
+#include <cstring>\n#include <cstdio>
 
 static const char* TAG = "wangyutang_app";
 static EventGroupHandle_t wifi_events;
@@ -67,36 +67,11 @@ static std::string device_state() {
     return result;
 }
 
-extern "C" void app_main() {
+static void local_console_task(void* arg) {\n    auto* player = static_cast<AudioPlayer*>(arg);\n    std::printf("\\r\\nLocal audio console ready. Type play + Enter.\\r\\n");\n    char line[64] = {};\n    while (true) {\n        if (std::fgets(line, sizeof(line), stdin)) {\n            if (std::strncmp(line, "play", 4) == 0) {\n                std::printf("Playing at 20%% volume...\\r\\n");\n                esp_err_t err = player->play_wav_url(\n                    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",\n                    20);\n                std::printf("Playback %s\\r\\n", err == ESP_OK ? "done" : "failed");\n            } else {\n                std::printf("Command: play\\r\\n");\n            }\n        }\n        vTaskDelay(pdMS_TO_TICKS(20));\n    }\n}\n\nextern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
     AudioPlayer audio_player;
 
-    DeviceHubClient hub(CONFIG_DEVICE_HUB_BASE_URL, CONFIG_DEVICE_ID,
-                        CONFIG_DEVICE_NAME, CONFIG_DEVICE_FIRMWARE_VERSION, device_state,
-                        [&audio_player](const HubCommand& command) -> std::string {
-                            ESP_LOGI(TAG, "received command %s (%s)", command.action.c_str(), command.id.c_str());
-                            if (command.action == "reboot") {
-                                esp_restart();
-                                return "done";
-                            }
-                            if (command.action == "play_test_audio") {
-                                return audio_player.play_wav_url(
-                                    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",
-                                    20) == ESP_OK ? "done" : "failed";
-                            }
-                            if (command.action == "identify") {
-                                ESP_LOGI(TAG, "identify command received");
-                                return "done";
-                            }
-                            return "unsupported";
-                        });
-
-    hub.register_device();
-    while (true) {
-        hub.heartbeat();
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-}
+    xTaskCreate(local_console_task, "local_console", 4096, &audio_player, 5, nullptr);\n    ESP_LOGI(TAG, "Local-only mode: platform connection disabled");\n    while (true) {\n        vTaskDelay(pdMS_TO_TICKS(1000));\n    }
