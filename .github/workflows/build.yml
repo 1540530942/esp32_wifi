@@ -20,6 +20,6 @@ jobs:
         with:
           name: esp32-s3-firmware
           path: |
-            esp32_wifi_impl/build/*.bin
+            esp32_wifi_impl/build/**/*.bin
             esp32_wifi_impl/build/flash_args
           if-no-files-found: error
