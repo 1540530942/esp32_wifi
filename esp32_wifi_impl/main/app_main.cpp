@@ -92,6 +92,6 @@ extern "C" void app_main() {
     hub.register_device();
     while (true) {
         hub.heartbeat();
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
