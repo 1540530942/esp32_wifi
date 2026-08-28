@@ -45,7 +45,9 @@ AudioPlayer::~AudioPlayer() {
 esp_err_t AudioPlayer::play_wav_url(const std::string& url, uint8_t volume_percent) {
     if (!codec_) return ESP_ERR_INVALID_STATE;
     if (task_) return ESP_ERR_INVALID_STATE;
-    if (url.rfind("https://", 0) != 0) return ESP_ERR_INVALID_ARG;
+    const bool https = url.rfind("https://", 0) == 0;
+    const bool cloud_http = url.rfind("http://110.40.154.41/devices/api/", 0) == 0;
+    if (!https && !cloud_http) return ESP_ERR_INVALID_ARG;
     pending_url_ = url;
     pending_volume_ = std::min<uint8_t>(volume_percent, 100);
     stop_requested_ = false;
@@ -86,6 +88,7 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
     if (err != ESP_OK) { esp_http_client_cleanup(client); return err; }
     int length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "WAV HTTP response status=%d content_length=%d", status, length);
     if (status < 200 || status >= 300 || length < 44) {
         esp_http_client_close(client); esp_http_client_cleanup(client); return ESP_FAIL;
     }
@@ -103,7 +106,9 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
     const int scale = volume_percent;
     AudioCodec_EnableOutput(codec_, true);
     AudioCodec_SetOutputVolume(codec_, scale);
+    size_t total_bytes = 0;
     while (!stop_requested_ && (read = esp_http_client_read(client, reinterpret_cast<char*>(input), sizeof(input))) > 0) {
+        total_bytes += static_cast<size_t>(read);
         int samples = read / 2;
         auto* pcm = reinterpret_cast<int16_t*>(input);
         for (int i = 0; i < samples; ++i) pcm[i] = static_cast<int16_t>((pcm[i] * scale) / 100);
@@ -112,5 +117,6 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
     AudioCodec_EnableOutput(codec_, false);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    ESP_LOGI(TAG, "WAV stream bytes=%u read_result=%d", (unsigned)total_bytes, read);
     return stop_requested_ ? ESP_ERR_INVALID_STATE : (err == ESP_OK ? ESP_OK : err);
 }

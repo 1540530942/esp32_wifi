@@ -170,9 +170,25 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     if (cmd.action == "play_audio") {
         cJSON* args = cJSON_Parse(cmd.args_json.c_str());
         const char* url = kTestAudioUrl;
+        std::string rewritten_url;
         cJSON* url_item = args ? cJSON_GetObjectItem(args, "url") : nullptr;
         cJSON* name_item = args ? cJSON_GetObjectItem(args, "name") : nullptr;
         if (cJSON_IsString(url_item) && std::strncmp(url_item->valuestring, "https://", 8) == 0) {
+            // The ISP path currently blocks TCP/443.  The platform has a
+            // direct-IP HTTP listener; preserve the cloud URL contract while
+            // using that listener for this network.
+            constexpr const char* kHttpsPrefix = "https://www.wangyutang.cn";
+            if (std::strncmp(url_item->valuestring, kHttpsPrefix,
+                             std::strlen(kHttpsPrefix)) == 0) {
+                rewritten_url = std::string("http://110.40.154.41") +
+                                (url_item->valuestring + std::strlen(kHttpsPrefix));
+                url = rewritten_url.c_str();
+            } else {
+                url = url_item->valuestring;
+            }
+        } else if (cJSON_IsString(url_item) &&
+                   std::strncmp(url_item->valuestring,
+                                "http://110.40.154.41/devices/api/", 33) == 0) {
             url = url_item->valuestring;
         } else if (cJSON_IsString(name_item) && std::strcmp(name_item->valuestring, "test") != 0) {
             if (args) cJSON_Delete(args);
@@ -193,6 +209,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
 }
 
 extern "C" void app_main() {
+    ESP_LOGI(TAG, "reset_reason=%d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(nvs_flash_init());
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
