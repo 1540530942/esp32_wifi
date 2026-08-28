@@ -74,19 +74,24 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "Wi-Fi connected");
     AudioPlayer audio_player;
 
-    DeviceHubClient hub(CONFIG_DEVICE_HUB_BASE_URL, CONFIG_DEVICE_HUB_TOKEN, CONFIG_DEVICE_ID,
-                        "esp32-wangyutang-v1", device_state,
-                        [&audio_player](const HubCommand& command) {
+    DeviceHubClient hub(CONFIG_DEVICE_HUB_BASE_URL, CONFIG_DEVICE_ID,
+                        CONFIG_DEVICE_NAME, CONFIG_DEVICE_FIRMWARE_VERSION, device_state,
+                        [&audio_player](const HubCommand& command) -> std::string {
                             ESP_LOGI(TAG, "received command %s (%s)", command.action.c_str(), command.id.c_str());
                             if (command.action == "reboot") {
                                 esp_restart();
+                                return "done";
                             }
                             if (command.action == "play_test_audio") {
                                 return audio_player.play_wav_url(
                                     "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",
-                                    20) == ESP_OK;
+                                    20) == ESP_OK ? "done" : "failed";
                             }
-                            return command.action == "identify";
+                            if (command.action == "identify") {
+                                ESP_LOGI(TAG, "identify command received");
+                                return "done";
+                            }
+                            return "unsupported";
                         });
 
     hub.register_device();
