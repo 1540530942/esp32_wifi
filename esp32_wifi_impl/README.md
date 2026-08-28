@@ -4,7 +4,7 @@
 
 - 连接 2.4 GHz Wi-Fi；
 - 向 `device_hub` 注册设备；
-- 每 30 秒上报心跳和设备状态；
+- 每 5 秒上报心跳和设备状态；
 - 接收网站下发的命令并回传 ACK；
 - 为现有 XiaoZhi 的音频播报、麦克风和屏幕能力预留集成边界。
 
@@ -23,10 +23,9 @@ idf.py -p COM4 flash monitor
 
 - Wi-Fi SSID / password；
 - `https://www.wangyutang.cn/devices/api`；
-- 设备令牌；
 - 唯一设备 ID。
 
-不要把 `sdkconfig`、Wi-Fi 密码或设备令牌提交到仓库。
+当前 v1 不使用令牌鉴权。不要把 `sdkconfig` 或 Wi-Fi 密码提交到仓库。
 
 ## 音频集成
 
@@ -37,9 +36,8 @@ idf.py -p COM4 flash monitor
 扬声器 GPIO: DOUT=48, BCLK=2, LRCK=1
 ```
 
-## 安全
+## 当前鉴权约定
 
-- 设备 API 使用 HTTPS 和 Bearer token；
-- token 只放在本地 NVS/menuconfig；
+- 当前 v1 使用 HTTPS，但暂不使用设备令牌鉴权；
 - 平台不应直接开放 ESP32 服务端口；
-- 所有危险命令必须经过平台鉴权。
+- 危险命令暂由平台接口控制；后续如需公网安全控制，再设计 v2 令牌鉴权。

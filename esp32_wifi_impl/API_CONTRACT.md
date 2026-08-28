@@ -5,7 +5,7 @@ Base URL: `https://www.wangyutang.cn/devices/api`
 All requests use `Content-Type: application/json` and:
 
 ```http
-Authorization: Bearer <DEVICE_TOKEN>
+No Authorization header is required in v1.
 ```
 
 ## Register
