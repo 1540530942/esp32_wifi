@@ -3,6 +3,7 @@
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -29,30 +30,39 @@ esp_err_t DeviceHubClient::post_json(const std::string& path, const std::string&
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.addr_type        = HTTP_ADDR_TYPE_INET;
     config.keep_alive_enable = false;
+    config.user_agent       = "esp32-wangyutang/1.0";
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return ESP_ERR_NO_MEM;
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body.c_str(), (int)body.size());
-
-    esp_err_t err = esp_http_client_perform(client);
+    esp_err_t err = esp_http_client_open(client, (int)body.size());
     if (err == ESP_OK) {
+        int written = esp_http_client_write(client, body.data(), (int)body.size());
+        if (written != (int)body.size()) err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        int length = esp_http_client_fetch_headers(client);
         int status = esp_http_client_get_status_code(client);
         if (status < 200 || status >= 300) {
             ESP_LOGW(TAG, "POST %s returned HTTP %d", path.c_str(), status);
             err = ESP_FAIL;
         } else if (response) {
-            int length = (int)esp_http_client_get_content_length(client);
-            if (length > 0 && length < 16384) {
-                response->resize(length);
-                int read = esp_http_client_read_response(client, response->data(), length);
-                if (read >= 0) response->resize((size_t)read);
+            response->clear();
+            char buffer[512];
+            int remaining = length;
+            while (remaining != 0) {
+                int want = remaining > 0 ? std::min(remaining, (int)sizeof(buffer)) : (int)sizeof(buffer);
+                int read = esp_http_client_read(client, buffer, want);
+                if (read <= 0) break;
+                response->append(buffer, (size_t)read);
+                if (remaining > 0) remaining -= read;
+                if (response->size() >= 16384) break;
             }
         }
-    } else {
-        ESP_LOGW(TAG, "POST %s failed: %s", path.c_str(), esp_err_to_name(err));
     }
+    if (err != ESP_OK) ESP_LOGW(TAG, "POST %s failed: %s", path.c_str(), esp_err_to_name(err));
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return err;
 }
