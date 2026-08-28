@@ -54,6 +54,11 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    // Keep the radio awake while the device maintains the long-lived cloud
+    // control link.  Some consumer APs/ISP gateways drop the first TCP
+    // exchange when an ESP station enters modem-sleep immediately after
+    // association.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
 static bool sync_clock_from_http_date() {
