@@ -60,4 +60,4 @@ The response may contain:
 }
 ```
 
-Initial actions: `identify`, `reboot`, `play_test_audio`. `play_test_audio` downloads the repository's `你今天好吗.wav` over HTTPS and plays it through the board speaker at 20% software-scaled volume. The production platform should expose this only to authenticated operators.
+Initial actions: `identify`, `reboot`, `set_volume`, `play_audio`, and `stop_audio`. `play_audio` accepts `{"name":"test"}` for the repository's `你今天好吗.wav`, or `{"url":"https://..."}` for an HTTPS PCM16 mono WAV. v1 intentionally uses no token authentication.

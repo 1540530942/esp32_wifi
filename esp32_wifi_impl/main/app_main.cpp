@@ -12,11 +12,23 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "cJSON.h"
-#include <cstring>\n#include <cstdio>
+#include <cstring>
+#include <cstdio>
+#include <algorithm>
+#include <string>
+
+// Compatibility shim for the locally bundled ESP-IDF Wi-Fi/WPA library pair.
+// WPA3 is disabled in this firmware, so the RSNXE query is never needed.
+extern "C" uint8_t* esp_wifi_sta_get_rsnxe(uint8_t*) {
+    return nullptr;
+}
 
 static const char* TAG = "wangyutang_app";
 static EventGroupHandle_t wifi_events;
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
+static constexpr char kTestAudioUrl[] =
+    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav";
+static int s_volume = 20;
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
@@ -67,24 +79,45 @@ static std::string device_state() {
     return result;
 }
 
-static void local_console_task(void* arg) {
-    auto* player = static_cast<AudioPlayer*>(arg);
-    std::printf("Local audio console ready. Type play + Enter.");
-    char line[64] = {};
-    while (true) {
-        if (std::fgets(line, sizeof(line), stdin)) {
-            if (std::strncmp(line, "play", 4) == 0) {
-                std::printf("Playing at 20%% volume...");
-                esp_err_t err = player->play_wav_url(
-                    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",
-                    20);
-                std::printf("Playback %s", err == ESP_OK ? "done" : "failed");
-            } else {
-                std::printf("Command: play");
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
+static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
+    ESP_LOGI(TAG, "executing command=%s args=%s", cmd.action.c_str(), cmd.args_json.c_str());
+    if (cmd.action == "reboot") {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+        return "done";
     }
+    if (cmd.action == "set_volume") {
+        cJSON* args = cJSON_Parse(cmd.args_json.c_str());
+        cJSON* value = args ? cJSON_GetObjectItem(args, "value") : nullptr;
+        if (!cJSON_IsNumber(value)) {
+            if (args) cJSON_Delete(args);
+            return "failed";
+        }
+        s_volume = std::max(0, std::min(100, (int)value->valuedouble));
+        if (args) cJSON_Delete(args);
+        ESP_LOGI(TAG, "volume set to %d", s_volume);
+        return "done";
+    }
+    if (cmd.action == "play_audio") {
+        cJSON* args = cJSON_Parse(cmd.args_json.c_str());
+        const char* url = kTestAudioUrl;
+        cJSON* url_item = args ? cJSON_GetObjectItem(args, "url") : nullptr;
+        cJSON* name_item = args ? cJSON_GetObjectItem(args, "name") : nullptr;
+        if (cJSON_IsString(url_item) && std::strncmp(url_item->valuestring, "https://", 8) == 0) {
+            url = url_item->valuestring;
+        } else if (cJSON_IsString(name_item) && std::strcmp(name_item->valuestring, "test") != 0) {
+            if (args) cJSON_Delete(args);
+            return "unsupported";
+        }
+        esp_err_t err = player->play_wav_url(url, (uint8_t)s_volume);
+        if (args) cJSON_Delete(args);
+        return err == ESP_OK ? "done" : "failed";
+    }
+    if (cmd.action == "identify") {
+        ESP_LOGI(TAG, "identify: audio device online");
+        return "done";
+    }
+    return "unsupported";
 }
 
 extern "C" void app_main() {
@@ -93,10 +126,22 @@ extern "C" void app_main() {
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
     AudioPlayer audio_player;
-
-    xTaskCreate(local_console_task, "local_console", 4096, &audio_player, 5, nullptr);
-    ESP_LOGI(TAG, "Local-only mode: platform connection disabled");
+    DeviceHubClient hub(
+        CONFIG_DEVICE_HUB_BASE_URL,
+        CONFIG_DEVICE_ID,
+        CONFIG_DEVICE_NAME,
+        CONFIG_DEVICE_FIRMWARE_VERSION,
+        device_state,
+        [&audio_player](const HubCommand& cmd) { return handle_command(cmd, &audio_player); }
+    );
+    hub.register_device();
+    ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
+            hub.heartbeat();
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi disconnected; heartbeat skipped");
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

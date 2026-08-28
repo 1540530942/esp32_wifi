@@ -98,12 +98,14 @@ esp_err_t DeviceHubClient::process_commands(const std::string& response) {
         cJSON_ArrayForEach(item, commands) {
             // Platform sends "id" (NOT "command_id") — critical field name
             cJSON* id     = cJSON_GetObjectItem(item, "id");
+            if (!cJSON_IsString(id)) id = cJSON_GetObjectItem(item, "command_id");
             cJSON* action = cJSON_GetObjectItem(item, "action");
             if (!cJSON_IsString(id) || !cJSON_IsString(action)) {
                 ESP_LOGW(TAG, "command missing id or action, skipping");
                 continue;
             }
             cJSON* args    = cJSON_GetObjectItem(item, "args");
+            if (!args) args = cJSON_GetObjectItem(item, "payload");
             char*  args_s  = args ? cJSON_PrintUnformatted(args) : nullptr;
             HubCommand cmd{ id->valuestring, action->valuestring,
                             args_s ? args_s : "{}" };

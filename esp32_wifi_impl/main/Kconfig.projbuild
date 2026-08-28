@@ -12,12 +12,16 @@ config DEVICE_HUB_BASE_URL
     string "Device hub base URL"
     default "https://www.wangyutang.cn/devices/api"
 
-config DEVICE_HUB_TOKEN
-    string "Device hub token"
-    default ""
-
 config DEVICE_ID
     string "Device ID"
     default "esp32-s3-walle"
+
+config DEVICE_NAME
+    string "Device display name"
+    default "WALLE ESP32"
+
+config DEVICE_FIRMWARE_VERSION
+    string "Firmware version"
+    default "esp32-wangyutang-v1"
 
 endmenu
