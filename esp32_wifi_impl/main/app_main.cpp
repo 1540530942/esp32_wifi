@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_sntp.h"
+#include "esp_http_client.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <string>
 #include <ctime>
+#include <sys/time.h>
 
 static const char* TAG = "wangyutang_app";
 static EventGroupHandle_t wifi_events;
@@ -54,14 +56,61 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+static bool sync_clock_from_http_date() {
+    // The site's HTTP redirect includes a Date header. Use it only to set the
+    // initial clock; all registration/audio traffic remains HTTPS.
+    esp_http_client_config_t config = {};
+    config.url = "http://www.wangyutang.cn/devices/api/health";
+    config.timeout_ms = 8000;
+    config.disable_auto_redirect = true;
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) return false;
+    esp_err_t err = esp_http_client_perform(client);
+    char* date_header = nullptr;
+    if (err == ESP_OK) esp_http_client_get_header(client, "Date", &date_header);
+    bool synced = false;
+    if (date_header) {
+        struct tm parsed = {};
+        if (strptime(date_header, "%a, %d %b %Y %H:%M:%S GMT", &parsed)) {
+            // Convert the UTC date without relying on the optional timegm()
+            // libc extension, which is not provided by ESP-IDF newlib.
+            int year = parsed.tm_year + 1900;
+            unsigned month = static_cast<unsigned>(parsed.tm_mon + 1);
+            year -= month <= 2;
+            const int era = (year >= 0 ? year : year - 399) / 400;
+            const unsigned yoe = static_cast<unsigned>(year - era * 400);
+            const unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5
+                                 + static_cast<unsigned>(parsed.tm_mday) - 1;
+            const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            const time_t days = static_cast<time_t>(era * 146097 + static_cast<int>(doe) - 719468);
+            struct timeval tv = {.tv_sec = days * 86400 + parsed.tm_hour * 3600
+                                           + parsed.tm_min * 60 + parsed.tm_sec,
+                                 .tv_usec = 0};
+            synced = settimeofday(&tv, nullptr) == 0;
+        }
+    }
+    esp_http_client_cleanup(client);
+    return synced;
+}
+
 static void sync_clock() {
     // HTTPS certificate validation requires a real wall clock. The ESP32
     // starts at epoch 0 after reset, so synchronize before the first request.
+    if (sync_clock_from_http_date()) {
+        ESP_LOGI(TAG, "clock synchronized from wangyutang HTTP Date header");
+        return;
+    }
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, const_cast<char*>("pool.ntp.org"));
+    esp_sntp_setservername(0, const_cast<char*>("ntp.aliyun.com"));
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 1
+    esp_sntp_setservername(1, const_cast<char*>("ntp.tencent.com"));
+#endif
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 2
+    esp_sntp_setservername(2, const_cast<char*>("time.cloudflare.com"));
+#endif
     esp_sntp_init();
     time_t now = 0;
-    for (int i = 0; i < 20 && now < 1700000000; ++i) {
+    for (int i = 0; i < 40 && now < 1700000000; ++i) {
         vTaskDelay(pdMS_TO_TICKS(500));
         time(&now);
     }
