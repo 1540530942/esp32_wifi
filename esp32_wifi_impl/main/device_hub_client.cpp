@@ -23,8 +23,12 @@ esp_err_t DeviceHubClient::post_json(const std::string& path, const std::string&
     esp_http_client_config_t config = {};
     config.url              = url.c_str();
     config.method           = HTTP_METHOD_POST;
-    config.timeout_ms       = 12000;
+    // Cellular/consumer Wi-Fi paths can take several seconds to establish a
+    // TLS connection. Keep the request bounded, but allow one slow handshake.
+    config.timeout_ms       = 30000;
     config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.addr_type        = HTTP_ADDR_TYPE_INET;
+    config.keep_alive_enable = false;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return ESP_ERR_NO_MEM;

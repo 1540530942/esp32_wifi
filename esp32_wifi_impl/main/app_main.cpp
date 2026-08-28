@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -16,12 +17,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <string>
-
-// Compatibility shim for the locally bundled ESP-IDF Wi-Fi/WPA library pair.
-// WPA3 is disabled in this firmware, so the RSNXE query is never needed.
-extern "C" uint8_t* esp_wifi_sta_get_rsnxe(uint8_t*) {
-    return nullptr;
-}
+#include <ctime>
 
 static const char* TAG = "wangyutang_app";
 static EventGroupHandle_t wifi_events;
@@ -29,6 +25,7 @@ static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr char kTestAudioUrl[] =
     "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav";
 static int s_volume = 20;
+static AudioPlayer* s_audio_player = nullptr;
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
@@ -57,6 +54,24 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+static void sync_clock() {
+    // HTTPS certificate validation requires a real wall clock. The ESP32
+    // starts at epoch 0 after reset, so synchronize before the first request.
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, const_cast<char*>("pool.ntp.org"));
+    esp_sntp_init();
+    time_t now = 0;
+    for (int i = 0; i < 20 && now < 1700000000; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        time(&now);
+    }
+    if (now >= 1700000000) {
+        ESP_LOGI(TAG, "SNTP time synchronized");
+    } else {
+        ESP_LOGW(TAG, "SNTP time synchronization timed out; HTTPS may fail");
+    }
+}
+
 static std::string device_state() {
     wifi_ap_record_t ap = {};
     esp_wifi_sta_get_ap_info(&ap);
@@ -72,6 +87,11 @@ static std::string device_state() {
     cJSON_AddStringToObject(state, "ip", ip_text);
     cJSON_AddNumberToObject(state, "uptime_s", esp_timer_get_time() / 1000000);
     cJSON_AddNumberToObject(state, "free_heap", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(state, "volume", s_volume);
+    cJSON_AddBoolToObject(state, "audio_playing",
+                          s_audio_player != nullptr && s_audio_player->is_playing());
+    cJSON_AddBoolToObject(state, "activated", s_audio_player != nullptr);
+    cJSON_AddStringToObject(state, "audio_capability", "play_audio,stop_audio");
     char* text = cJSON_PrintUnformatted(state);
     std::string result = text ? text : "{}";
     cJSON_free(text);
@@ -113,6 +133,9 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         if (args) cJSON_Delete(args);
         return err == ESP_OK ? "done" : "failed";
     }
+    if (cmd.action == "stop_audio") {
+        return player->stop() == ESP_OK ? "done" : "failed";
+    }
     if (cmd.action == "identify") {
         ESP_LOGI(TAG, "identify: audio device online");
         return "done";
@@ -125,7 +148,9 @@ extern "C" void app_main() {
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
+    sync_clock();
     AudioPlayer audio_player;
+    s_audio_player = &audio_player;
     DeviceHubClient hub(
         CONFIG_DEVICE_HUB_BASE_URL,
         CONFIG_DEVICE_ID,
@@ -134,7 +159,12 @@ extern "C" void app_main() {
         device_state,
         [&audio_player](const HubCommand& cmd) { return handle_command(cmd, &audio_player); }
     );
-    hub.register_device();
+    // Keep retrying registration so a transient WAN/DNS/TLS failure does not
+    // leave the device permanently absent from the platform.
+    while (hub.register_device() != ESP_OK) {
+        ESP_LOGW(TAG, "device registration failed; retrying in 10 seconds");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
