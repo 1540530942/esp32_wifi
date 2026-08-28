@@ -60,4 +60,4 @@ The response may contain:
 }
 ```
 
-Initial actions: `identify`, `reboot`. Audio and display actions will be added after the platform endpoint is deployed and the XiaoZhi integration boundary is finalized.
+Initial actions: `identify`, `reboot`, `play_test_audio`. `play_test_audio` downloads the repository's `你今天好吗.wav` over HTTPS and plays it through the board speaker at 20% software-scaled volume. The production platform should expose this only to authenticated operators.
