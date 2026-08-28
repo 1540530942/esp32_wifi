@@ -69,18 +69,18 @@ static std::string device_state() {
 
 static void local_console_task(void* arg) {
     auto* player = static_cast<AudioPlayer*>(arg);
-    std::printf("\r\nLocal audio console ready. Type play + Enter.\r\n");
+    std::printf("Local audio console ready. Type play + Enter.");
     char line[64] = {};
     while (true) {
         if (std::fgets(line, sizeof(line), stdin)) {
             if (std::strncmp(line, "play", 4) == 0) {
-                std::printf("Playing at 20%% volume...\r\n");
+                std::printf("Playing at 20%% volume...");
                 esp_err_t err = player->play_wav_url(
                     "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",
                     20);
-                std::printf("Playback %s\r\n", err == ESP_OK ? "done" : "failed");
+                std::printf("Playback %s", err == ESP_OK ? "done" : "failed");
             } else {
-                std::printf("Command: play\r\n");
+                std::printf("Command: play");
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20));
