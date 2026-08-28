@@ -232,9 +232,11 @@ extern "C" void app_main() {
     );
     // Keep retrying registration so a transient WAN/DNS/TLS failure does not
     // leave the device permanently absent from the platform.
+    int retry_seconds = 10;
     while (hub.register_device() != ESP_OK) {
-        ESP_LOGW(TAG, "device registration failed; retrying in 10 seconds");
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        ESP_LOGW(TAG, "device registration failed; retrying in %d seconds", retry_seconds);
+        vTaskDelay(pdMS_TO_TICKS(retry_seconds * 1000));
+        retry_seconds = std::min(retry_seconds * 2, 120);
     }
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
     while (true) {
