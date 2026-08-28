@@ -67,11 +67,36 @@ static std::string device_state() {
     return result;
 }
 
-static void local_console_task(void* arg) {\n    auto* player = static_cast<AudioPlayer*>(arg);\n    std::printf("\\r\\nLocal audio console ready. Type play + Enter.\\r\\n");\n    char line[64] = {};\n    while (true) {\n        if (std::fgets(line, sizeof(line), stdin)) {\n            if (std::strncmp(line, "play", 4) == 0) {\n                std::printf("Playing at 20%% volume...\\r\\n");\n                esp_err_t err = player->play_wav_url(\n                    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",\n                    20);\n                std::printf("Playback %s\\r\\n", err == ESP_OK ? "done" : "failed");\n            } else {\n                std::printf("Command: play\\r\\n");\n            }\n        }\n        vTaskDelay(pdMS_TO_TICKS(20));\n    }\n}\n\nextern "C" void app_main() {
+static void local_console_task(void* arg) {
+    auto* player = static_cast<AudioPlayer*>(arg);
+    std::printf("\r\nLocal audio console ready. Type play + Enter.\r\n");
+    char line[64] = {};
+    while (true) {
+        if (std::fgets(line, sizeof(line), stdin)) {
+            if (std::strncmp(line, "play", 4) == 0) {
+                std::printf("Playing at 20%% volume...\r\n");
+                esp_err_t err = player->play_wav_url(
+                    "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav",
+                    20);
+                std::printf("Playback %s\r\n", err == ESP_OK ? "done" : "failed");
+            } else {
+                std::printf("Command: play\r\n");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+extern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
     AudioPlayer audio_player;
 
-    xTaskCreate(local_console_task, "local_console", 4096, &audio_player, 5, nullptr);\n    ESP_LOGI(TAG, "Local-only mode: platform connection disabled");\n    while (true) {\n        vTaskDelay(pdMS_TO_TICKS(1000));\n    }
+    xTaskCreate(local_console_task, "local_console", 4096, &audio_player, 5, nullptr);
+    ESP_LOGI(TAG, "Local-only mode: platform connection disabled");
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
