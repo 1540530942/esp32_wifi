@@ -14,11 +14,11 @@ void AudioCodec_SetInstance(AudioCodec* codec) {
     s_audio_codec = codec;
 }
 
-void AudioCodec_OutputData(AudioCodec* codec, const int16_t* data, size_t samples) {
+int AudioCodec_OutputData(AudioCodec* codec, const int16_t* data, size_t samples) {
     if (codec == NULL || codec->write == NULL || data == NULL || samples == 0) {
-        return;
+        return 0;
     }
-    codec->write(codec, data, (int)samples);
+    return codec->write(codec, data, (int)samples);
 }
 
 bool AudioCodec_InputData(AudioCodec* codec, int16_t* data, size_t samples) {

@@ -9,6 +9,7 @@ struct HubCommand {
     std::string id;       // platform field: "id" (NOT "command_id")
     std::string action;
     std::string args_json;
+    std::string text;
 };
 
 class DeviceHubClient {
@@ -26,6 +27,7 @@ public:
 
     esp_err_t register_device();
     esp_err_t heartbeat();
+    esp_err_t log_event(const std::string& level, const std::string& message);
 
 private:
     esp_err_t post_json(const std::string& path, const std::string& body,

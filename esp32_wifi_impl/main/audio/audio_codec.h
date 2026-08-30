@@ -51,7 +51,7 @@ void AudioCodec_SetOutputVolume(AudioCodec* codec, int volume);
 void AudioCodec_SetInputGain(AudioCodec* codec, float gain);
 void AudioCodec_EnableInput(AudioCodec* codec, bool enable);
 void AudioCodec_EnableOutput(AudioCodec* codec, bool enable);
-void AudioCodec_OutputData(AudioCodec* codec, const int16_t* data, size_t samples);
+int AudioCodec_OutputData(AudioCodec* codec, const int16_t* data, size_t samples);
 bool AudioCodec_InputData(AudioCodec* codec, int16_t* data, size_t samples);
 
 bool AudioCodec_GetOutputEnabled(const AudioCodec* codec);
