@@ -1,4 +1,5 @@
 #include "device_hub_client.h"
+#include "ota_updater.h"
 #include "audio_player.h"
 #include "mqtt_control_client.h"
 
@@ -172,7 +173,7 @@ static std::string device_state() {
     char ip_text[16] = {};
     esp_ip4addr_ntoa(&ip.ip, ip_text, sizeof(ip_text));
     cJSON* state = cJSON_CreateObject();
-    cJSON_AddStringToObject(state, "firmware", "esp32-wangyutang-v1");
+    cJSON_AddStringToObject(state, "firmware", CONFIG_DEVICE_FIRMWARE_VERSION);
     cJSON_AddStringToObject(state, "wifi_ssid", reinterpret_cast<char*>(ap.ssid));
     cJSON_AddNumberToObject(state, "wifi_rssi", ap.rssi);
     cJSON_AddStringToObject(state, "ip", ip_text);
@@ -285,6 +286,30 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     if (cmd.action == "identify") {
         ESP_LOGI(TAG, "identify: audio device online");
         return "done";
+    }
+    if (cmd.action == "ota") {
+        cJSON* ota_args = cJSON_Parse(cmd.args_json.c_str());
+        cJSON* ota_url_item = ota_args ? cJSON_GetObjectItem(ota_args, "url") : nullptr;
+        if (!cJSON_IsString(ota_url_item)) {
+            if (ota_args) cJSON_Delete(ota_args);
+            return "failed|stage=ota error=missing_url";
+        }
+        // Reuse the play_audio contract: rewrite the HTTPS cloud host to the
+        // direct-IP HTTP listener, since this ISP blocks TCP/443.
+        std::string ota_url = ota_url_item->valuestring;
+        constexpr const char* kOtaHttpsHost = "https://www.wangyutang.cn";
+        if (ota_url.rfind(kOtaHttpsHost, 0) == 0) {
+            ota_url = std::string("http://110.40.154.41") + ota_url.substr(std::strlen(kOtaHttpsHost));
+        }
+        if (ota_args) cJSON_Delete(ota_args);
+        esp_err_t ota_err = ota_run_from_url(ota_url.c_str());
+        if (ota_err != ESP_OK) {
+            return "failed|stage=ota error=" + std::string(esp_err_to_name(ota_err));
+        }
+        ESP_LOGI(TAG, "OTA applied, rebooting into new image");
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+        return "done";  // not reached
     }
     return "unsupported";
 }
