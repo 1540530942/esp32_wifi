@@ -1,0 +1,225 @@
+:root {
+  --ink: #10211d;
+  --muted: #64716d;
+  --paper: #f8f2e8;
+  --panel: rgba(255, 252, 244, 0.86);
+  --line: rgba(16, 33, 29, 0.12);
+  --green: #1b7f5f;
+  --amber: #e2a53a;
+  --coral: #e85d45;
+  --shadow: 0 24px 70px rgba(23, 44, 39, 0.18);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: "LXGW WenKai", "Microsoft YaHei", "Noto Serif SC", serif;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(232, 93, 69, 0.2), transparent 28rem),
+    radial-gradient(circle at 84% 10%, rgba(27, 127, 95, 0.22), transparent 26rem),
+    linear-gradient(135deg, #fbf0dc 0%, #edf6ec 52%, #f9efe7 100%);
+}
+
+.page {
+  width: min(1120px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 72px;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.crumbs { color: var(--muted); font-size: 0.9rem; }
+.crumbs a { color: var(--green); text-decoration: none; }
+.crumbs a:hover { text-decoration: underline; }
+
+h1 { margin: 0 0 6px; font-size: clamp(1.6rem, 4vw, 2.2rem); }
+.lead { margin: 0; color: var(--muted); }
+
+.refresh {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.refresh:hover { border-color: var(--green); color: var(--green); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+  margin-top: 8px;
+}
+
+.card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 22px 24px;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.card:hover { transform: translateY(-3px); border-color: var(--green); }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.card h2 { margin: 0; font-size: 1.2rem; }
+.card .sub { color: var(--muted); font-size: 0.82rem; margin: 2px 0 0; }
+
+.dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.dot::before {
+  content: "";
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.dot.online { color: var(--green); border-color: rgba(27,127,95,0.35); }
+.dot.online::before { background: var(--green); box-shadow: 0 0 0 4px rgba(27,127,95,0.15); }
+.dot.offline { color: var(--coral); border-color: rgba(232,93,69,0.35); }
+.dot.offline::before { background: var(--coral); }
+
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin-top: 6px; }
+.metric { font-size: 0.86rem; }
+.metric .k { color: var(--muted); }
+.metric .v { font-weight: 600; }
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 24px 26px;
+  margin-top: 18px;
+}
+.panel h2 { margin: 0 0 14px; font-size: 1.15rem; }
+
+.kv { width: 100%; border-collapse: collapse; }
+.kv td { padding: 7px 4px; border-bottom: 1px dashed var(--line); font-size: 0.9rem; vertical-align: top; }
+.kv td.k { color: var(--muted); width: 40%; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 9px 16px;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--green); color: var(--green); }
+.btn.primary { border-color: var(--green); color: var(--green); }
+.btn.primary:hover { background: var(--green); color: #fff; }
+.btn.danger:hover { border-color: var(--coral); color: var(--coral); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tab { border: 1px solid var(--line); background: #fff; color: var(--muted); border-radius: 8px; padding: 6px 14px; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.tab.active { border-color: var(--green); color: var(--green); font-weight: 600; }
+.tab-body textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 0.9rem; resize: vertical; }
+.hidden { display: none !important; }
+
+.logline { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.logline .lv { display: inline-block; width: 46px; font-weight: 700; }
+.lv.info { color: var(--green); }
+.lv.warn { color: var(--amber); }
+.lv.error { color: var(--coral); }
+.lv.debug { color: var(--muted); }
+
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--ink); color: #fff; padding: 10px 20px; border-radius: 999px;
+  font-size: 0.88rem; opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+}
+.toast.show { opacity: 0.95; }
+
+/* ── 搜索栏 ── */
+.search-bar { margin-bottom: 16px; }
+.search-bar input {
+  width: 100%; border: 1px solid var(--line); border-radius: 999px;
+  padding: 10px 20px; font: inherit; font-size: 0.9rem;
+  background: var(--panel); color: var(--ink); outline: none;
+}
+.search-bar input:focus { border-color: var(--green); }
+.search-bar input::placeholder { color: var(--muted); }
+
+/* ── 批量控制栏 ── */
+.batch-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.batch-bar select {
+  border: 1px solid var(--line); border-radius: 12px; padding: 8px 14px;
+  font: inherit; font-size: 0.88rem; background: var(--panel); color: var(--ink); outline: none; cursor: pointer;
+}
+.batch-bar select:focus { border-color: var(--green); }
+
+/* ── 离线告警面板 ── */
+.alert-banner {
+  border: 1px solid rgba(232,93,69,0.4); background: rgba(232,93,69,0.06);
+  border-radius: 14px; padding: 14px 18px; margin-bottom: 16px;
+}
+.alert-banner h3 { margin: 0 0 8px; color: var(--coral); font-size: 0.92rem; }
+.alert-item {
+  padding: 5px 0; border-bottom: 1px dashed rgba(232,93,69,0.2);
+  font-size: 0.85rem; display: flex; justify-content: space-between; gap: 12px;
+}
+.alert-item:last-child { border-bottom: none; }
+.alert-time { color: var(--muted); white-space: nowrap; }
+
+/* ── 指令状态 badge ── */
+.sbadge {
+  display: inline-block; font-size: 0.73rem; padding: 2px 9px;
+  border-radius: 999px; font-weight: 600; white-space: nowrap;
+}
+.sbadge.done      { background: rgba(27,127,95,0.12); color: var(--green); }
+.sbadge.failed    { background: rgba(232,93,69,0.12); color: var(--coral); }
+.sbadge.unsupported { background: rgba(226,165,58,0.15); color: #9a6800; }
+.sbadge.pending   { background: rgba(16,33,29,0.08); color: var(--muted); }
+.sbadge.dispatched { background: rgba(16,33,29,0.08); color: var(--ink); }
+
+/* ── 指令 timeline ── */
+.cmd-timeline { display: flex; flex-direction: column; gap: 10px; }
+.cmd-card {
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; background: rgba(255,255,255,0.45);
+}
+.cmd-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cmd-action { font-weight: 600; font-size: 0.88rem; font-family: ui-monospace,"SF Mono",Menlo,monospace; }
+.cmd-args { color: var(--muted); font-size: 0.78rem; font-family: ui-monospace,monospace; margin-top: 3px; }
+.cmd-times { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; }
+.cmd-ts { font-size: 0.76rem; color: var(--muted); }
+.cmd-ts b { color: var(--ink); font-weight: 500; }
+.cmd-msg { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+.volume-control{display:flex;align-items:center;gap:8px;margin-top:8px}.volume-control input[type=range]{flex:1;min-width:120px}.volume-step{min-width:34px;padding:5px 9px}.volume-control output{min-width:42px;text-align:right;font-variant-numeric:tabular-nums}

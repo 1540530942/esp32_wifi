@@ -12,6 +12,7 @@
 #include "esp_sntp.h"
 #include "esp_http_client.h"
 #include "esp_task_wdt.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -33,6 +34,20 @@ static constexpr char kTestAudioUrl[] =
 static int s_volume = 30;
 static AudioPlayer* s_audio_player = nullptr;
 static MqttControlClient* s_mqtt_control = nullptr;
+static std::string s_wifi_ssid;
+static std::string s_wifi_password;
+
+static void delayed_restart_task(void*) {
+    vTaskDelay(pdMS_TO_TICKS(1800));
+    esp_restart();
+}
+
+static bool running_image_pending_verify() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    return running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+           state == ESP_OTA_IMG_PENDING_VERIFY;
+}
 
 static void load_persisted_settings() {
     nvs_handle_t handle = 0;
@@ -56,6 +71,37 @@ static void persist_volume() {
     nvs_close(handle);
     if (err != ESP_OK) ESP_LOGW(TAG, "failed to persist volume=%d: %s", s_volume,
                                 esp_err_to_name(err));
+}
+
+static void load_persisted_network() {
+    s_wifi_ssid = CONFIG_DEVICE_WIFI_SSID;
+    s_wifi_password = CONFIG_DEVICE_WIFI_PASSWORD;
+    nvs_handle_t handle = 0;
+    if (nvs_open("network", NVS_READWRITE, &handle) != ESP_OK) return;
+    size_t ssid_len = 0;
+    size_t password_len = 0;
+    if (nvs_get_str(handle, "ssid", nullptr, &ssid_len) == ESP_OK && ssid_len > 1) {
+        std::string stored_ssid(ssid_len, '\0');
+        if (nvs_get_str(handle, "ssid", stored_ssid.data(), &ssid_len) == ESP_OK) {
+            stored_ssid.resize(ssid_len - 1);
+            s_wifi_ssid = stored_ssid;
+        }
+    }
+    if (nvs_get_str(handle, "password", nullptr, &password_len) == ESP_OK && password_len > 1) {
+        std::string stored_password(password_len, '\0');
+        if (nvs_get_str(handle, "password", stored_password.data(), &password_len) == ESP_OK) {
+            stored_password.resize(password_len - 1);
+            s_wifi_password = stored_password;
+        }
+    }
+    if (ssid_len == 0 && !s_wifi_ssid.empty()) {
+        nvs_set_str(handle, "ssid", s_wifi_ssid.c_str());
+        nvs_set_str(handle, "password", s_wifi_password.c_str());
+        nvs_commit(handle);
+        ESP_LOGI(TAG, "persisted Wi-Fi configuration for future OTA images");
+    }
+    nvs_close(handle);
+    ESP_LOGI(TAG, "network configuration ready ssid=%s", s_wifi_ssid.c_str());
 }
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* arg) {
@@ -86,8 +132,8 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr));
     wifi_config_t config = {};
-    std::strncpy(reinterpret_cast<char*>(config.sta.ssid), CONFIG_DEVICE_WIFI_SSID, sizeof(config.sta.ssid));
-    std::strncpy(reinterpret_cast<char*>(config.sta.password), CONFIG_DEVICE_WIFI_PASSWORD, sizeof(config.sta.password));
+    std::strncpy(reinterpret_cast<char*>(config.sta.ssid), s_wifi_ssid.c_str(), sizeof(config.sta.ssid));
+    std::strncpy(reinterpret_cast<char*>(config.sta.password), s_wifi_password.c_str(), sizeof(config.sta.password));
     config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
@@ -302,14 +348,20 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             ota_url = std::string("http://110.40.154.41") + ota_url.substr(std::strlen(kOtaHttpsHost));
         }
         if (ota_args) cJSON_Delete(ota_args);
-        esp_err_t ota_err = ota_run_from_url(ota_url.c_str());
+        esp_err_t ota_err = ota_run_from_url(ota_url.c_str(), [&cmd](size_t bytes, size_t total) {
+            if (!s_mqtt_control) return;
+            s_mqtt_control->publish_progress(
+                cmd.id, "ota", "stage=download bytes=" + std::to_string(bytes) +
+                " total=" + std::to_string(total));
+        });
         if (ota_err != ESP_OK) {
             return "failed|stage=ota error=" + std::string(esp_err_to_name(ota_err));
         }
-        ESP_LOGI(TAG, "OTA applied, rebooting into new image");
-        vTaskDelay(pdMS_TO_TICKS(800));
-        esp_restart();
-        return "done";  // not reached
+        ESP_LOGI(TAG, "OTA applied, ACK will be sent before delayed reboot");
+        if (xTaskCreate(delayed_restart_task, "ota_reboot", 2048, nullptr, 4, nullptr) != pdPASS) {
+            return "failed|stage=ota error=reboot_task_allocation";
+        }
+        return "done|event=ota_applied version=" + std::string(CONFIG_DEVICE_FIRMWARE_VERSION);
     }
     return "unsupported";
 }
@@ -318,6 +370,7 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "reset_reason=%d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(nvs_flash_init());
     load_persisted_settings();
+    load_persisted_network();
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
@@ -347,6 +400,9 @@ extern "C" void app_main() {
         retry_seconds = std::min(retry_seconds * 2, 120);
     }
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
+    bool ota_pending_verify = running_image_pending_verify();
+    const int64_t ota_verify_started_us = esp_timer_get_time();
+    if (ota_pending_verify) ESP_LOGW(TAG, "OTA image pending health verification");
     // MQTT over WebSocket uses the already reachable public HTTP entrypoint.
     // The current integration intentionally has no authentication.
     MqttControlClient mqtt("wss://www.wangyutang.cn/mqtt", CONFIG_DEVICE_ID,
@@ -362,6 +418,15 @@ extern "C" void app_main() {
             hub.heartbeat();
         } else {
             ESP_LOGW(TAG, "Wi-Fi disconnected; heartbeat skipped");
+        }
+        if (ota_pending_verify && mqtt.is_connected()) {
+            const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGI(TAG, "OTA health verification result=%s", esp_err_to_name(valid_err));
+            if (valid_err == ESP_OK) ota_pending_verify = false;
+        } else if (ota_pending_verify &&
+                   esp_timer_get_time() - ota_verify_started_us > 120LL * 1000000LL) {
+            ESP_LOGE(TAG, "OTA health verification timed out; rebooting for rollback");
+            esp_restart();
         }
         // MQTT is the primary control plane; keep HTTP heartbeat as a
         // low-rate presence/fallback channel so it does not compete with a

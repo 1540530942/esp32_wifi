@@ -69,6 +69,12 @@ esp_err_t MqttControlClient::stop() {
     return err;
 }
 
+void MqttControlClient::publish_progress(const std::string& command_id,
+                                         const std::string& action,
+                                         const std::string& message) {
+    publish_status(command_id, "progress", message, action);
+}
+
 void MqttControlClient::event_handler(void* handler_args, esp_event_base_t,
                                       int32_t event_id, void* event_data) {
     auto* self = static_cast<MqttControlClient*>(handler_args);

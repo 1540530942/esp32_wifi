@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OTA 发布 · WALLE</title>
+    <link rel="stylesheet" href="/devices/static/styles.css" />
+    <style>
+      .ota-layout { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+      .select-list { display:flex; flex-direction:column; gap:8px; max-height:360px; overflow:auto; }
+      .select-row { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:rgba(255,255,255,.45); }
+      .select-row .grow { flex:1; min-width:0; }
+      .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+      .release-meta { color:var(--muted); font-size:.78rem; margin-top:3px; word-break:break-all; }
+      .job { border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:10px; }
+      .job-head { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+      .target { display:grid; grid-template-columns:minmax(160px,1fr) 110px minmax(220px,2fr); gap:10px; padding:8px 0; border-bottom:1px dashed var(--line); font-size:.82rem; }
+      .audit { max-height:300px; overflow:auto; margin-top:10px; }
+      .audit-line { font: .76rem ui-monospace,"SF Mono",Menlo,monospace; padding:4px 0; border-bottom:1px dashed var(--line); }
+      .ota-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:14px; }
+      @media (max-width:800px) { .ota-layout { grid-template-columns:1fr; } .target { grid-template-columns:1fr; } }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="topbar">
+        <div>
+          <div class="crumbs"><a href="/devices/">← 设备终端</a></div>
+          <h1>OTA 发布</h1>
+          <p class="lead">选择已发布固件和在线设备，完整跟踪下载、重启与版本确认。</p>
+        </div>
+        <button class="refresh" id="refresh">刷新</button>
+      </div>
+
+      <div class="ota-layout">
+        <section class="panel" style="margin-top:0">
+          <h2>1. 选择固件版本</h2>
+          <div id="releases" class="select-list"><div class="empty">加载中…</div></div>
+        </section>
+        <section class="panel" style="margin-top:0">
+          <h2>2. 选择在线设备</h2>
+          <div id="devices" class="select-list"><div class="empty">加载中…</div></div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <h2>3. 确认并下发</h2>
+        <label><input type="checkbox" id="force" /> 允许对相同版本强制重刷</label>
+        <div class="ota-actions">
+          <button class="btn primary" id="deploy">创建 OTA 任务</button>
+          <span class="lead" id="selection">请选择版本和设备</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>OTA 任务与审计日志</h2>
+        <div id="jobs"><div class="empty">加载中…</div></div>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const API = "/devices/api";
+      let releases = [];
+      let devices = [];
+      let jobs = [];
+      let selectedRelease = "";
+      const selectedDevices = new Set();
+
+      const esc = (value) => String(value == null ? "" : value).replace(/[&<>"]/g,
+        c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+      const fmt = (sec) => sec ? new Date(sec * 1000).toLocaleString("zh-CN", {hour12:false}) : "—";
+      function toast(message) {
+        const el = document.getElementById("toast"); el.textContent = message; el.classList.add("show");
+        setTimeout(() => el.classList.remove("show"), 2600);
+      }
+      function badge(state) { return `<span class="sbadge ${state === "verified" ? "done" : state === "failed" ? "failed" : "dispatched"}">${esc(state)}</span>`; }
+
+      async function api(path, options) {
+        const response = await fetch(API + path, Object.assign({cache:"no-store"}, options || {}));
+        const raw = await response.text();
+        let body = {}; try { body = raw ? JSON.parse(raw) : {}; } catch (_) { body = {detail:raw}; }
+        if (!response.ok || body.ok === false) throw new Error(body.detail || body.message || body.error || `HTTP ${response.status}`);
+        return body;
+      }
+
+      async function load() {
+        try {
+          const [releaseData, deviceData, jobData] = await Promise.all([
+            api("/ota/releases"), api("/list"), api("/ota/jobs?limit=30")
+          ]);
+          releases = releaseData.releases || [];
+          devices = (deviceData.devices || []).filter(item => item.online);
+          jobs = jobData.jobs || [];
+          render();
+        } catch (error) { toast("加载失败：" + error.message); }
+      }
+
+      function render() {
+        document.getElementById("releases").innerHTML = releases.length ? releases.map(r => `
+          <label class="select-row">
+            <input type="radio" name="release" value="${esc(r.id)}" ${selectedRelease === r.id ? "checked" : ""} />
+            <div class="grow"><strong>${esc(r.version)}</strong>
+              <div class="release-meta">${Math.round((r.size || 0)/1024)} KiB · ${esc((r.sha256 || "").slice(0,16))} · ${esc((r.commit_sha || "").slice(0,12))}</div>
+              <div class="release-meta">${fmt(r.created_at)} ${r.notes ? "· " + esc(r.notes) : ""}</div>
+            </div>
+          </label>`).join("") : '<div class="empty">暂无由 GitHub Actions 发布的固件</div>';
+        document.querySelectorAll('input[name="release"]').forEach(el => el.onchange = () => { selectedRelease = el.value; updateSelection(); });
+
+        document.getElementById("devices").innerHTML = devices.length ? devices.map(d => `
+          <label class="select-row">
+            <input type="checkbox" data-device="${esc(d.device_id)}" ${selectedDevices.has(d.device_id) ? "checked" : ""} />
+            <div class="grow"><strong>${esc(d.name || d.device_id)}</strong>
+              <div class="release-meta mono">${esc(d.device_id)} · ${esc((d.state || {}).firmware || "unknown")}</div>
+            </div><span class="dot online">在线</span>
+          </label>`).join("") : '<div class="empty">没有在线设备</div>';
+        document.querySelectorAll('[data-device]').forEach(el => el.onchange = () => { el.checked ? selectedDevices.add(el.dataset.device) : selectedDevices.delete(el.dataset.device); updateSelection(); });
+
+        document.getElementById("jobs").innerHTML = jobs.length ? jobs.map(jobHtml).join("") : '<div class="empty">暂无 OTA 任务</div>';
+        document.querySelectorAll('[data-job]').forEach(el => el.onclick = () => loadAudit(el.dataset.job));
+        updateSelection();
+      }
+
+      function jobHtml(job) {
+        const targets = Object.values(job.targets || {});
+        return `<div class="job"><div class="job-head"><div><strong>${esc(job.version)}</strong> <span class="mono">${esc(job.id)}</span><div class="release-meta">${fmt(job.created_at)}</div></div>${badge(job.status)}</div>
+          <div>${targets.map(t => `<div class="target"><span class="mono">${esc(t.device_id)}</span>${badge(t.state)}<span>${esc(t.from_version)} → ${esc(t.to_version)} ${t.message ? "· " + esc(t.message) : ""}</span></div>`).join("")}</div>
+          <button class="btn" data-job="${esc(job.id)}" style="margin-top:10px">查看完整日志</button><div class="audit" id="audit-${esc(job.id)}"></div></div>`;
+      }
+
+      async function loadAudit(jobId) {
+        try {
+          const data = await api("/ota/jobs/" + encodeURIComponent(jobId));
+          const target = document.getElementById("audit-" + jobId);
+          target.innerHTML = (data.audit || []).map(e => `<div class="audit-line">${esc(fmt(e.ts))} · ${esc(e.device_id || "system")} · <strong>${esc(e.event)}</strong> · ${esc(JSON.stringify(e.detail || {}))}</div>`).join("") || '<div class="empty">暂无日志</div>';
+        } catch (error) { toast("日志加载失败：" + error.message); }
+      }
+
+      function updateSelection() {
+        const release = releases.find(item => item.id === selectedRelease);
+        document.getElementById("selection").textContent = release ? `${release.version} → ${selectedDevices.size} 台设备` : "请选择版本和设备";
+      }
+
+      document.getElementById("deploy").onclick = async () => {
+        if (!selectedRelease || !selectedDevices.size) { toast("请选择固件版本和在线设备"); return; }
+        const release = releases.find(item => item.id === selectedRelease);
+        const deviceIds = Array.from(selectedDevices);
+        if (!confirm(`确认将 ${release.version} 下发到 ${deviceIds.length} 台设备？`)) return;
+        const button = document.getElementById("deploy"); button.disabled = true;
+        try {
+          const data = await api("/ota/jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({release_id:selectedRelease, device_ids:deviceIds, force:document.getElementById("force").checked})});
+          toast("OTA 任务已创建：" + data.job_id); selectedDevices.clear(); await load();
+        } catch (error) { toast("下发失败：" + error.message); }
+        button.disabled = false;
+      };
+      document.getElementById("refresh").onclick = load;
+      load(); setInterval(load, 3000);
+    </script>
+  </body>
+</html>

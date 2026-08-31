@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>设备详情 · WALLE</title>
+    <link rel="stylesheet" href="/devices/static/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topbar">
+        <div>
+          <div class="crumbs"><a href="/devices/">← 设备终端</a></div>
+          <h1 id="title">设备详情</h1>
+          <p class="lead" id="subtitle">—</p>
+        </div>
+        <span class="dot" id="status">—</span>
+      </div>
+
+      <section class="panel">
+        <h2>远程播报</h2>
+        <div class="tabs">
+          <button class="tab active" data-tab="text">文本播报</button>
+          <button class="tab" data-tab="upload">上传音频</button>
+        </div>
+        <div class="tab-body" id="tab-text">
+          <textarea id="speak-text" rows="3" placeholder="输入要播报的文字，平台自动生成语音下发给设备…"></textarea>
+          <div class="volume-control" aria-label="播报音量">
+            <span>音量</span>
+            <button class="btn volume-step" id="volume-down" type="button">−</button>
+            <input id="volume-range" type="range" min="0" max="100" step="5" value="30" />
+            <button class="btn volume-step" id="volume-up" type="button">＋</button>
+            <output id="volume-value">30%</output>
+          </div>
+          <div class="actions" style="margin-top:8px">
+            <button class="btn primary" id="btn-speak-pcm">PCM生成并播报</button>
+            <button class="btn" id="btn-speak-http">HTTP生成并播报</button>
+            <button class="btn" id="btn-test-audio">快速测试：早上好，我的公主</button>
+            <button class="btn" id="btn-stop-text">停止播报</button>
+          </div>
+        </div>
+        <div class="tab-body hidden" id="tab-upload">
+          <input type="file" id="upload-file" accept="audio/*" style="margin-bottom:8px;display:block" />
+          <div class="actions">
+            <button class="btn primary" id="btn-upload">上传并播报</button>
+            <button class="btn" id="btn-stop-upload">停止播报</button>
+          </div>
+        </div>
+        <p class="lead" style="margin-top:12px;font-size:0.82rem">
+          指令入队后设备在下次心跳（≤5s）取回执行，结果回执见下方指令历史。
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>其他控制</h2>
+        <div class="actions">
+          <button class="btn" data-action="identify">辨认（闪灯/响一声）</button>
+          <button class="btn" data-action="set_volume" data-prompt="音量 0-100" data-arg="value">设置音量</button>
+          <button class="btn danger" data-action="reboot" data-confirm="确定重启该设备？">重启</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>状态</h2>
+        <table class="kv"><tbody id="state"></tbody></table>
+      </section>
+
+      <section class="panel">
+        <h2>指令历史</h2>
+        <div id="commands"><div class="empty">—</div></div>
+      </section>
+
+      <section class="panel">
+        <h2>设备日志</h2>
+        <div id="logs"><div class="empty">—</div></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const API = "/devices/api";
+      const id = new URLSearchParams(location.search).get("id") || "";
+
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+        );
+      }
+      function apiError(j, status) {
+        if (j && j.message) return String(j.message);
+        if (j && j.error) return String(j.error);
+        if (j && j.detail) {
+          if (Array.isArray(j.detail)) {
+            return j.detail.map(x => x && (x.msg || x.message) || String(x)).join("；");
+          }
+          return String(j.detail);
+        }
+        return "HTTP " + status;
+      }
+      function fmtTime(sec) {
+        if (!sec) return "—";
+        return new Date(sec * 1000).toLocaleString("zh-CN", { hour12: false });
+      }
+      function fmtAge(sec) {
+        if (!sec) return "—";
+        const d = Math.max(0, Math.floor(Date.now() / 1000 - sec));
+        if (d < 60) return d + " 秒前";
+        if (d < 3600) return Math.floor(d / 60) + " 分钟前";
+        return Math.floor(d / 3600) + " 小时前";
+      }
+      function toast(msg) {
+        const t = document.getElementById("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        setTimeout(() => t.classList.remove("show"), 2200);
+      }
+
+      const STATE_LABELS = {
+        firmware: "固件", wifi_ssid: "WiFi SSID", wifi_rssi: "信号 (dBm)",
+        ip: "IP", uptime_s: "运行时长 (s)", free_heap: "空闲堆 (B)",
+        activated: "已激活", volume: "音量",
+        mqtt_connected: "MQTT 控制面", reset_reason: "重启原因",
+      };
+      const RESET_REASON = {1:"上电",3:"软件重启",6:"WDT",7:"任务WDT",11:"USB-JTAG串口",12:"Brownout欠压"};
+
+      async function load() {
+        try {
+          const r = await fetch(API + "/device/" + encodeURIComponent(id), { cache: "no-store" });
+          if (r.status === 404) { document.getElementById("subtitle").textContent = "设备不存在"; return; }
+          const j = await r.json();
+          const d = j.device;
+          document.getElementById("title").textContent = d.name || d.device_id;
+          document.getElementById("subtitle").textContent = d.device_type + " · " + d.device_id;
+          const s = document.getElementById("status");
+          s.className = "dot " + (d.online ? "online" : "offline");
+          s.textContent = d.online ? "在线" : "离线";
+          renderState(d.state || {}, d);
+          renderCommands(d.commands || []);
+          renderLogs(d.logs || []);
+        } catch (e) {
+          toast("加载失败：" + e.message);
+        }
+      }
+
+      function renderState(st, d) {
+        const keys = Object.keys(st);
+        keys.sort((a, b) => (STATE_LABELS[a] ? -1 : 0) - (STATE_LABELS[b] ? -1 : 0));
+        const htmlRows = [];
+        for (const k of keys) {
+          const label = STATE_LABELS[k] || k;
+          let val;
+          if (k === "mqtt_connected") {
+            const ok = st[k] === true || st[k] === "true";
+            val = `<span class="sbadge ${ok ? "done" : "failed"}">${ok ? "已连接" : "未连接"}</span>`;
+          } else if (k === "reset_reason") {
+            const code = Number(st[k]);
+            const desc = RESET_REASON[code] || `code ${code}`;
+            val = `<span style="font-family:monospace">${code}</span> <span style="color:var(--muted);font-size:0.85em">${esc(desc)}</span>`;
+          } else {
+            val = esc(typeof st[k] === "object" ? JSON.stringify(st[k]) : st[k]);
+          }
+          htmlRows.push(`<tr><td class="k">${esc(label)}</td><td>${val}</td></tr>`);
+        }
+        document.getElementById("state").innerHTML =
+          `<tr><td class="k">最后心跳</td><td>${esc(fmtAge(d.last_seen) + "（" + fmtTime(d.last_seen) + "）")}</td></tr>` +
+          `<tr><td class="k">首次上线</td><td>${esc(fmtTime(d.first_seen))}</td></tr>` +
+          htmlRows.join("");
+      }
+
+      function fmtPlayback(c) {
+        const parts = [];
+        if (c.playback_bytes != null) parts.push(`bytes=${c.playback_bytes}`);
+        if (c.playback_elapsed_ms != null) parts.push(`total=${c.playback_elapsed_ms}ms`);
+        if (c.pa_gpio17 != null) {
+          const paOk = c.pa_gpio17 > 0;
+          parts.push(`<span class="sbadge ${paOk ? "done" : "failed"}" style="font-size:0.72rem">PA:GPIO17=${c.pa_gpio17}</span>`);
+        }
+        return parts.length ? `<div class="cmd-msg" style="color:var(--muted);font-size:0.78rem">${parts.join(" · ")}</div>` : "";
+      }
+
+      function renderCommands(cmds) {
+        const el = document.getElementById("commands");
+        if (!cmds.length) { el.innerHTML = '<div class="empty">暂无指令</div>'; return; }
+        const recent = cmds.slice().reverse().slice(0, 30);
+        el.innerHTML = '<div class="cmd-timeline">' + recent.map(cmdCard).join("") + "</div>";
+      }
+
+      function cmdCard(c) {
+        const args = c.args || {};
+        const argsCopy = Object.assign({}, args);
+        delete argsCopy.url;
+        delete argsCopy.text;
+        const argsStr = Object.keys(argsCopy).length ? JSON.stringify(argsCopy) : "";
+        const sourceText = c.text || args.text || (c.action === "play_audio" ? "[original text not recorded]" : "");
+        const times = [];
+        if (c.created_at) times.push(`<span class="cmd-ts">下发 <b>${fmtTime(c.created_at)}</b></span>`);
+        if (c.dispatched_at) times.push(`<span class="cmd-ts">派送 <b>${fmtAge(c.dispatched_at)}</b></span>`);
+        if (c.done_at) times.push(`<span class="cmd-ts">完成 <b>${fmtAge(c.done_at)}</b></span>`);
+        const st = c.status || "pending";
+        return `<div class="cmd-card">
+          <div class="cmd-head">
+            <span class="cmd-action">${esc(c.action)}</span>
+            <span class="sbadge ${esc(st)}">${esc(st)}</span>
+          </div>
+          ${sourceText ? `<div class="cmd-text">播报文本：${esc(sourceText)}</div>` : ""}
+          ${argsStr ? `<div class="cmd-args">${esc(argsStr)}</div>` : ""}
+          ${times.length ? `<div class="cmd-times">${times.join("")}</div>` : ""}
+          ${c.message ? `<div class="cmd-msg">${esc(c.message)}</div>` : ""}
+          ${fmtPlayback(c)}
+        </div>`;
+      }
+
+      function renderLogs(logs) {
+        const el = document.getElementById("logs");
+        if (!logs.length) { el.innerHTML = '<div class="empty">暂无日志</div>'; return; }
+        const recent = logs.slice().reverse().slice(0, 50);
+        el.innerHTML = recent
+          .map((l) => `<div class="logline"><span class="lv ${esc(l.level)}">${esc(l.level)}</span>` +
+                      `${esc(l.message)} <span style="color:var(--muted)">${fmtAge(l.ts)}</span></div>`)
+          .join("");
+      }
+
+      async function sendCommand(action, args) {
+        try {
+          const r = await fetch(API + "/device/" + encodeURIComponent(id) + "/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, args: args || {} }),
+          });
+          const j = await r.json();
+          if (j.ok) { toast("已下发：" + action + "（≤5s 生效）"); load(); }
+          else toast("下发失败：" + apiError(j, r.status));
+        } catch (e) { toast("下发失败：" + e.message); }
+      }
+
+      document.querySelectorAll(".actions .btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const action = btn.dataset.action;
+          if (!action) return;
+          if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+          let args = {};
+          if (btn.dataset.prompt) {
+            const v = prompt(btn.dataset.prompt);
+            if (v === null) return;
+            const n = Number(v);
+            args[btn.dataset.arg] = Number.isFinite(n) ? n : v;
+          }
+          sendCommand(action, args);
+        });
+      });
+
+      // 标签切换
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+          document.querySelectorAll(".tab-body").forEach(b => b.classList.add("hidden"));
+          tab.classList.add("active");
+          document.getElementById("tab-" + tab.dataset.tab).classList.remove("hidden");
+        });
+      });
+
+      // 音量：默认 30%，每次调整 5%，范围 0-100
+      const volumeRange = document.getElementById("volume-range");
+      const volumeValue = document.getElementById("volume-value");
+      let selectedVolume = Number(localStorage.getItem("device-volume-" + id));
+      if (!Number.isFinite(selectedVolume)) selectedVolume = 30;
+      function updateVolumeUi(v) {
+        selectedVolume = Math.max(0, Math.min(100, Math.round(v / 5) * 5));
+        volumeRange.value = selectedVolume;
+        volumeValue.textContent = selectedVolume + "%";
+        localStorage.setItem("device-volume-" + id, String(selectedVolume));
+      }
+      volumeRange.addEventListener("input", () => updateVolumeUi(Number(volumeRange.value)));
+      document.getElementById("volume-down").addEventListener("click", () => updateVolumeUi(selectedVolume - 5));
+      document.getElementById("volume-up").addEventListener("click", () => updateVolumeUi(selectedVolume + 5));
+      updateVolumeUi(selectedVolume);
+
+      // 文本播报：分别保留 HTTP WAV 和 WebSocket PCM 两条链路，便于现场对比验证
+      async function speakByTransport(endpoint, buttonId, label) {
+        const text = document.getElementById("speak-text").value.trim();
+        if (!text) { toast("请输入播报文字"); return; }
+        const btn = document.getElementById(buttonId);
+        btn.disabled = true; btn.textContent = "生成中…";
+        try {
+          const r = await fetch(API + "/device/" + encodeURIComponent(id) + endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, volume: selectedVolume }),
+          });
+          const raw = await r.text();
+          let j = {};
+          try { j = raw ? JSON.parse(raw) : {}; } catch (_) { j = { message: raw.slice(0, 160) }; }
+          if (r.ok && j.ok) { toast("已下发" + label + "（音量 " + selectedVolume + "%）"); load(); }
+          else toast("生成/下发失败：" + (j.message || j.error || ("HTTP " + r.status)));
+        } catch (e) { toast("生成/下发失败：网络错误：" + e.message); }
+        btn.disabled = false; btn.textContent = label;
+      }
+      document.getElementById("btn-speak-pcm").addEventListener("click", () =>
+        speakByTransport("/speak_pcm", "btn-speak-pcm", "PCM生成并播报"));
+      document.getElementById("btn-speak-http").addEventListener("click", () =>
+        speakByTransport("/speak", "btn-speak-http", "HTTP生成并播报"));
+
+      // 固定测试音频：缓存后直接下发，便于快速验证
+      document.getElementById("btn-test-audio").addEventListener("click", async () => {
+        const btn = document.getElementById("btn-test-audio");
+        btn.disabled = true; btn.textContent = "测试音频下发中…";
+        try {
+          const r = await fetch(API + "/device/" + encodeURIComponent(id) + "/speak_pcm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: "早上好，我的公主", volume: selectedVolume }),
+          });
+          const raw = await r.text();
+          let j = {};
+          try { j = raw ? JSON.parse(raw) : {}; } catch (_) { j = { message: raw.slice(0, 160) }; }
+          if (r.ok && j.ok) { toast("已下发测试音频（音量 " + selectedVolume + "%）"); load(); }
+          else toast("测试音频失败：" + apiError(j, r.status));
+        } catch (e) { toast("测试音频失败：" + e.message); }
+        btn.disabled = false; btn.textContent = "快速测试：早上好，我的公主";
+      });
+
+      // 上传音频
+      document.getElementById("btn-upload").addEventListener("click", async () => {
+        const file = document.getElementById("upload-file").files[0];
+        if (!file) { toast("请先选择音频文件"); return; }
+        const btn = document.getElementById("btn-upload");
+        btn.disabled = true; btn.textContent = "上传中…";
+        try {
+          const form = new FormData();
+          form.append("file", file);
+          const r = await fetch(API + "/device/" + encodeURIComponent(id) + "/upload_audio", {
+            method: "POST", body: form,
+          });
+          const j = await r.json();
+          if (j.ok) { toast("已下发播放（≤5s 生效）"); load(); }
+          else toast("失败：" + apiError(j, r.status));
+        } catch (e) { toast("失败：" + e.message); }
+        btn.disabled = false; btn.textContent = "上传并播报";
+      });
+
+      // 停止播报
+      ["btn-stop-text", "btn-stop-upload"].forEach(bid => {
+        document.getElementById(bid).addEventListener("click", () => sendCommand("stop_audio", {}));
+      });
+
+      if (!id) document.getElementById("subtitle").textContent = "缺少 ?id= 参数";
+      else { load(); setInterval(load, 5000); }
+    </script>
+  </body>
+</html>

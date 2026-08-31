@@ -1,0 +1,123 @@
+name: Build and publish OTA firmware
+
+on:
+  push:
+    tags:
+      - "ota-*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Firmware version, for example esp32-wangyutang-v5-ota"
+        required: true
+        type: string
+      notes:
+        description: "Release notes shown on /devices/ota"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ota-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_NOTES: ${{ inputs.notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${INPUT_VERSION}"
+            notes="${INPUT_NOTES}"
+          else
+            version="${GITHUB_REF_NAME#ota-}"
+            notes="OTA release from tag ${GITHUB_REF_NAME}"
+          fi
+          notes="${notes//$'\n'/ }"
+          if [[ ! "${version}" =~ ^[A-Za-z0-9._+-]{1,80}$ ]]; then
+            echo "Invalid firmware version: ${version}" >&2
+            exit 1
+          fi
+          sed -i -E "s|^CONFIG_DEVICE_FIRMWARE_VERSION=.*$|CONFIG_DEVICE_FIRMWARE_VERSION=\"${version}\"|" esp32_wifi_impl/sdkconfig.defaults
+          {
+            echo "OTA_VERSION=${version}"
+            echo "OTA_NOTES=${notes}"
+            echo "OTA_BUILD_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build ESP32-S3 OTA image
+        uses: docker://espressif/idf:v5.5.4
+        with:
+          args: bash -lc "cd $GITHUB_WORKSPACE/esp32_wifi_impl && idf.py set-target esp32s3 && idf.py build"
+
+      - name: Validate and fingerprint image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=esp32_wifi_impl/build/esp32_wangyutang.bin
+          test -f "${image}"
+          size=$(stat -c '%s' "${image}")
+          if (( size > 3145728 )); then
+            echo "Firmware ${size} bytes exceeds the 3 MiB OTA slot" >&2
+            exit 1
+          fi
+          sha=$(sha256sum "${image}" | awk '{print $1}')
+          echo "OTA_IMAGE=${image}" >> "${GITHUB_ENV}"
+          echo "OTA_SIZE=${size}" >> "${GITHUB_ENV}"
+          echo "OTA_SHA256=${sha}" >> "${GITHUB_ENV}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OTA_VERSION }}
+          path: |
+            esp32_wifi_impl/build/esp32_wangyutang.bin
+            esp32_wifi_impl/build/bootloader/bootloader.bin
+            esp32_wifi_impl/build/partition_table/partition-table.bin
+            esp32_wifi_impl/build/flash_args
+          if-no-files-found: error
+
+      - name: Publish release to device hub
+        env:
+          OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
+          OTA_PUBLISH_URL: ${{ vars.OTA_PUBLISH_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_url="${OTA_PUBLISH_URL:-https://www.wangyutang.cn/devices/api/ota/releases}"
+          auth=()
+          if [[ -n "${OTA_PUBLISH_TOKEN}" ]]; then
+            auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
+          fi
+          response=$(curl --fail-with-body --retry 3 --retry-all-errors \
+            "${auth[@]}" \
+            -F "firmware=@${OTA_IMAGE};type=application/octet-stream" \
+            -F "version=${OTA_VERSION}" \
+            -F "commit_sha=${GITHUB_SHA}" \
+            -F "branch=${GITHUB_REF_NAME}" \
+            -F "build_url=${OTA_BUILD_URL}" \
+            -F "notes=${OTA_NOTES}" \
+            "${publish_url}")
+          echo "${response}" | tee ota-publish-response.json
+          python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok"), data' <<<"${response}"
+
+      - name: Release summary
+        shell: bash
+        run: |
+          {
+            echo "## OTA firmware published"
+            echo "- Version: \`${OTA_VERSION}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Size: \`${OTA_SIZE}\` bytes"
+            echo "- SHA256: \`${OTA_SHA256}\`"
+            echo "- Deployment console: https://www.wangyutang.cn/devices/ota"
+          } >> "${GITHUB_STEP_SUMMARY}"

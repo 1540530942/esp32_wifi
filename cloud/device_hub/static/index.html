@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>设备终端 · WALLE</title>
+    <link rel="stylesheet" href="/devices/static/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topbar">
+        <div>
+          <div class="crumbs"><a href="/">← 返回首页</a></div>
+          <h1>设备终端</h1>
+          <p class="lead">联网设备的在线状态、WiFi 信号与远程控制</p>
+        </div>
+        <div class="actions">
+          <a class="btn primary" href="/devices/ota">OTA 发布</a>
+          <button class="refresh" id="refresh">刷新</button>
+        </div>
+      </div>
+
+      <div class="grid" id="grid">
+        <div class="empty">加载中…</div>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const API = "/devices/api";
+
+      function fmtAge(sec) {
+        if (!sec) return "—";
+        const d = Math.max(0, Math.floor(Date.now() / 1000 - sec));
+        if (d < 60) return d + " 秒前";
+        if (d < 3600) return Math.floor(d / 60) + " 分钟前";
+        if (d < 86400) return Math.floor(d / 3600) + " 小时前";
+        return Math.floor(d / 86400) + " 天前";
+      }
+      function rssiLabel(r) {
+        if (r === undefined || r === null || r === "") return "—";
+        let q = "弱";
+        if (r >= -55) q = "极佳";
+        else if (r >= -67) q = "良好";
+        else if (r >= -75) q = "一般";
+        return r + " dBm · " + q;
+      }
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+        );
+      }
+
+      async function load() {
+        const grid = document.getElementById("grid");
+        try {
+          const r = await fetch(API + "/list", { cache: "no-store" });
+          const j = await r.json();
+          const devices = j.devices || [];
+          if (!devices.length) {
+            grid.innerHTML =
+              '<div class="empty">还没有设备上线。<br/>设备按契约 POST /devices/api/register 后会出现在这里。</div>';
+            return;
+          }
+          grid.innerHTML = devices.map(cardHtml).join("");
+        } catch (e) {
+          grid.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+        }
+      }
+
+      function cardHtml(d) {
+        const st = d.state || {};
+        const cls = d.online ? "online" : "offline";
+        const label = d.online ? "在线" : "离线";
+        const pend = d.pending_commands
+          ? '<span class="dot">待执行 ' + d.pending_commands + "</span>"
+          : "";
+        return `
+          <a class="card" href="/devices/device?id=${encodeURIComponent(d.device_id)}">
+            <div class="card-head">
+              <div>
+                <h2>${esc(d.name)}</h2>
+                <p class="sub">${esc(d.device_type)} · ${esc(d.device_id)}</p>
+              </div>
+              <span class="dot ${cls}">${label}</span>
+            </div>
+            <div class="metrics">
+              <div class="metric"><div class="k">WiFi</div><div class="v">${esc(st.wifi_ssid || "—")}</div></div>
+              <div class="metric"><div class="k">信号</div><div class="v">${esc(rssiLabel(st.wifi_rssi))}</div></div>
+              <div class="metric"><div class="k">IP</div><div class="v">${esc(st.ip || "—")}</div></div>
+              <div class="metric"><div class="k">最后心跳</div><div class="v">${fmtAge(d.last_seen)}</div></div>
+            </div>
+            <div style="margin-top:12px">${pend}</div>
+          </a>`;
+      }
+
+      document.getElementById("refresh").addEventListener("click", load);
+      load();
+      setInterval(load, 5000);
+    </script>
+  </body>
+</html>

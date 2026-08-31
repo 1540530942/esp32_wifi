@@ -19,6 +19,8 @@ public:
     esp_err_t start();
     esp_err_t stop();
     bool is_connected() const { return connected_.load(); }
+    void publish_progress(const std::string& command_id, const std::string& action,
+                          const std::string& message);
 
 private:
     static void event_handler(void* handler_args, esp_event_base_t base,
