@@ -59,6 +59,23 @@ Bootloader rollback 是 Bootloader 功能，不能仅通过应用 OTA 更新。�
 
 如果新镜像在 120 秒内无法完成平台注册和 MQTT 健康检查，设备重启并由 Bootloader 回滚。
 
+## 端到端验收记录（2026-09-01）
+
+- Git tag：`ota-esp32-wangyutang-v6-ota`
+- Git commit：`eae2db9d109fc08bfe5a7bd9634700d5562bf694`
+- GitHub Actions：`https://github.com/1540530942/esp32_wifi/actions/runs/33420901758`
+- 发布版本：`esp32-wangyutang-v6-ota`，release ID `rel-dbfc9f796386`
+- 固件大小：1117168 bytes
+- SHA256：`14882150745b8242d070eade1ffa209f3f21175c2b09a75da4d75a08247902b7`
+- OTA job：`ota-a70a47f51921`，设备 `esp32-s3-walle`
+- 任务创建：2026-09-01 01:45:44（Asia/Shanghai）
+- 版本验证：2026-09-01 01:46:04（Asia/Shanghai），全链路约 20 秒
+- 最终状态：`verified`；设备在线、`firmware=esp32-wangyutang-v6-ota`、`mqtt_connected=true`
+
+持久化审计记录已验证包含 `release_published`、`job_created`、`command_published`、
+多条 `download_progress`、`downloading`、`rebooting`、`verified` 和 `job_verified`。
+这证明从 GitHub tag 构建、版本登记、网页选择设备下发、设备下载重启到新版本心跳确认的流程可全自动执行并回溯。
+
 ## API
 
 ```text
@@ -78,4 +95,3 @@ curl -X POST 'https://www.wangyutang.cn/devices/api/ota/jobs' \
   -H 'Content-Type: application/json' \
   -d '{"release_id":"rel-xxxx","device_ids":["esp32-s3-walle"],"force":false}'
 ```
-
