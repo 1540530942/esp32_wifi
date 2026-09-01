@@ -76,6 +76,19 @@ Bootloader rollback 是 Bootloader 功能，不能仅通过应用 OTA 更新。�
 多条 `download_progress`、`downloading`、`rebooting`、`verified` 和 `job_verified`。
 这证明从 GitHub tag 构建、版本登记、网页选择设备下发、设备下载重启到新版本心跳确认的流程可全自动执行并回溯。
 
+### 音频可靠性修复版本（2026-09-01）
+
+- 版本：`esp32-wangyutang-v7-audio-fix`
+- commit：`7c6ccd46aa7508597807390e6e6ef5aa1e28d9aa`
+- Actions：`https://github.com/1540530942/esp32_wifi/actions/runs/33458132274`
+- release：`rel-01fae9f76c67`
+- OTA job：`ota-6cedbf48cf85`，最终状态 `verified`
+- HTTP 回归：`c-ae4e8c`，MQTT 下发、8 KiB 流式 WAV 播放，状态 `done`
+- PCM 回归：`c-02b0e8`，99,840 bytes，状态 `done`
+
+该版本修复 HTTP 播报未发布 MQTT、整段 WAV 分配导致 `ESP_ERR_NO_MEM`、快速 ACK 被
+`dispatched` 覆盖，以及 WebSocket/TLS 奇数字节分片造成 16-bit PCM 样本错位噪声的问题。
+
 ## API
 
 ```text
