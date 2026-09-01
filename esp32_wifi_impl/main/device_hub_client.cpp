@@ -14,6 +14,7 @@
 #include <utility>
 
 static const char* TAG = "device_hub";
+static constexpr const char* kHubHttpFallbackBase = "http://110.40.154.41/devices/api";
 
 DeviceHubClient::DeviceHubClient(std::string base_url, std::string device_id,
                                  std::string device_name, std::string firmware,
@@ -97,8 +98,6 @@ static esp_err_t post_http_raw(const std::string& base_url, const std::string& p
             }
             ESP_LOGI(TAG, "raw recv ended n=%d errno=%d total=%u", n, errno,
                      static_cast<unsigned>(raw.size()));
-            ESP_LOGI(TAG, "raw recv ended n=%d errno=%d total=%u", n, errno,
-                     static_cast<unsigned>(raw.size()));
             ESP_LOGI(TAG, "raw response head: %.*s", (int)(raw.size() > 120 ? 120 : raw.size()), raw.c_str());
             const size_t header_end = raw.find("\r\n\r\n");
             if (header_end != std::string::npos && raw.size() >= 12 &&
@@ -129,9 +128,10 @@ esp_err_t DeviceHubClient::post_json(const std::string& path, const std::string&
     esp_http_client_config_t config = {};
     config.url              = url.c_str();
     config.method           = HTTP_METHOD_POST;
-    // Cellular/consumer Wi-Fi paths can take several seconds to establish a
-    // TLS connection. Keep the request bounded, but allow one slow handshake.
-    config.timeout_ms       = 30000;
+    // A working home-Wi-Fi TLS handshake completes in a few seconds. Bound the
+    // public endpoint attempt so registration can quickly use the direct HTTP
+    // fallback when the ISP path to port 443 is temporarily unavailable.
+    config.timeout_ms       = 10000;
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.addr_type        = HTTP_ADDR_TYPE_INET;
     config.keep_alive_enable = false;
@@ -162,6 +162,19 @@ esp_err_t DeviceHubClient::post_json(const std::string& path, const std::string&
     if (err != ESP_OK) ESP_LOGW(TAG, "POST %s failed: %s", path.c_str(), esp_err_to_name(err));
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    if (err != ESP_OK && base_url_ == "https://www.wangyutang.cn/devices/api") {
+        ESP_LOGW(TAG, "public HTTPS unavailable; retrying %s%s",
+                 kHubHttpFallbackBase, path.c_str());
+        if (response) response->clear();
+        const esp_err_t fallback_err = post_http_raw(kHubHttpFallbackBase, path, body, response);
+        if (fallback_err == ESP_OK) {
+            ESP_LOGI(TAG, "POST %s recovered through direct HTTP fallback", path.c_str());
+        } else {
+            ESP_LOGW(TAG, "direct HTTP fallback POST %s failed: %s", path.c_str(),
+                     esp_err_to_name(fallback_err));
+        }
+        return fallback_err;
+    }
     return err;
 }
 

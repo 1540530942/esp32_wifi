@@ -313,6 +313,19 @@ def install_ota_routes(
                                     command["status"] = "done"
                                     command["done_at"] = now
                                     command["message"] = "OTA verified after reboot"
+                            elif previous_state == "rebooting" and \
+                                    current_version == target.get("from_version") and \
+                                    current_uptime < int(target.get("uptime_before") or 0) and \
+                                    float(rec.get("last_seen", 0)) > float(job.get("created_at", 0)) + 3:
+                                next_state = "failed"
+                                message = (f"OTA rollback detected: device rebooted on "
+                                           f"{current_version or 'previous firmware'}")
+                                target["rollback_detected_at"] = now
+                                commands_to_clear.append((device_id, str(target.get("command_id"))))
+                                if command:
+                                    command["status"] = "failed"
+                                    command["done_at"] = now
+                                    command["message"] = message
                             elif command and command.get("status") == "failed":
                                 next_state = "failed"
                                 message = str(command.get("message") or "device reported OTA failure")
