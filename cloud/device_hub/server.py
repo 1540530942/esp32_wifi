@@ -542,15 +542,40 @@ def speak(device_id: str, req: SpeakReq) -> Any:
             "action": "play_audio",
             "text": req.text,
             "args": {"url": audio_url, "volume": req.volume},
-            "status": "pending",
+            # Reserve the command before MQTT publish so heartbeat cannot
+            # race it and mark it dispatched without MQTT delivery.
+            "status": "dispatching",
             "created_at": time.time(),
             "dispatched_at": 0.0,
             "done_at": 0.0,
             "message": "",
+            "transport": "mqtt",
         })
         data[device_id] = rec
         _save(data)
-    return {"ok": True, "command_id": command_id, "audio_url": audio_url}
+    published = _enqueue_mqtt_command(
+        device_id, command_id, "play_audio",
+        {"url": audio_url, "volume": req.volume}, req.text,
+    )
+    with DATA_LOCK:
+        data = _load()
+        rec = data[device_id]
+        for command in rec.get("commands", []):
+            if command.get("id") == command_id:
+                # A fast device can ACK while publish() is still returning.
+                # Never overwrite a terminal ACK with "dispatched".
+                if command.get("status") == "dispatching":
+                    command["status"] = "dispatched" if published else "pending"
+                    command["dispatched_at"] = time.time() if published else 0.0
+                    command["transport"] = "mqtt" if published else "heartbeat"
+                break
+        _save(data)
+    return {
+        "ok": True,
+        "command_id": command_id,
+        "audio_url": audio_url,
+        "transport": "mqtt" if published else "heartbeat",
+    }
 
 
 class TestAudioReq(BaseModel):
@@ -586,7 +611,7 @@ def test_audio(device_id: str, req: TestAudioReq) -> Any:
             "action": "play_audio",
             "text": TEST_AUDIO_TEXT,
             "args": {"url": audio_url, "volume": req.volume},
-            "status": "pending",
+            "status": "dispatching",
             "created_at": time.time(),
             "dispatched_at": 0.0,
             "done_at": 0.0,
@@ -602,7 +627,16 @@ def test_audio(device_id: str, req: TestAudioReq) -> Any:
             rec = data[device_id]
             for c in rec.get("commands", []):
                 if c.get("id") == command_id:
-                    c["status"] = "dispatched"; c["dispatched_at"] = time.time(); c["transport"] = "mqtt"
+                    if c.get("status") == "dispatching":
+                        c["status"] = "dispatched"; c["dispatched_at"] = time.time(); c["transport"] = "mqtt"
+            _save(data)
+    else:
+        with DATA_LOCK:
+            data = _load()
+            rec = data[device_id]
+            for c in rec.get("commands", []):
+                if c.get("id") == command_id and c.get("status") == "dispatching":
+                    c["status"] = "pending"; c["transport"] = "heartbeat"
             _save(data)
     return {"ok": True, "command_id": command_id, "audio_url": audio_url, "text": TEST_AUDIO_TEXT, "transport": "mqtt" if _mqtt_enqueue_ok else "heartbeat"}
 
@@ -651,9 +685,10 @@ def speak_pcm(device_id: str, req: SpeakPcmReq) -> Any:
     with DATA_LOCK:
         data = _load(); rec = data[device_id]
         for c in rec.get("commands", []):
-            if c.get("id") == command_id:
+            if c.get("id") == command_id and c.get("status") == "dispatching":
                 c["status"] = "dispatched" if published else "pending"
                 c["dispatched_at"] = time.time() if published else 0.0
+                c["transport"] = "mqtt" if published else "heartbeat"
         _save(data)
     return {"ok": True, "command_id": command_id, "stream_id": stream_id, "transport": "mqtt" if published else "heartbeat", "stream_url": args["stream_url"]}
 
@@ -681,14 +716,18 @@ async def pcm_websocket(websocket: WebSocket, device_id: str, stream_id: str = "
             pcm = wf.readframes(wf.getnframes())
         stream_started = time.monotonic()
         frame_count = 0
-        # Use one frame for short fixed/normal utterances to avoid needless
-        # ESP-IDF WS/TLS read fragmentation. Bound long utterances at 32 KiB;
-        # very large single frames can exhaust the device WS/TLS heap.
-        packet_bytes = len(pcm) if len(pcm) <= 262144 else 32768
+        # 20 ms of 24 kHz / 16-bit / mono PCM. Small, even-sized frames avoid
+        # large TLS/WS fragmentation and give the device a stable jitter
+        # margin. Send the first 100 ms immediately, then pace at real time.
+        packet_bytes = 24000 * 2 * 20 // 1000
+        frame_interval_s = 0.020
+        prebuffer_frames = 5
         await websocket.send_json({"event": "stream_start", "total_bytes": len(pcm), "audio": {"codec": "pcm_s16le", "sample_rate": 24000, "channels": 1, "frame_ms": 20, "packet_bytes": packet_bytes}})
         first_frame_at = time.monotonic()
-        for offset in range(0, len(pcm), packet_bytes):
+        for frame_index, offset in enumerate(range(0, len(pcm), packet_bytes)):
             await websocket.send_bytes(pcm[offset:offset + packet_bytes])
+            if frame_index + 1 >= prebuffer_frames and offset + packet_bytes < len(pcm):
+                await asyncio.sleep(frame_interval_s)
         frame_count = (len(pcm) + packet_bytes - 1) // packet_bytes if pcm else 0
         stream_elapsed_ms = int((time.monotonic() - stream_started) * 1000)
         first_frame_ms = int((first_frame_at - stream_started) * 1000)

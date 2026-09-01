@@ -151,12 +151,13 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
              (esp_timer_get_time() - started_us) / 1000,
              esp_transport_ws_get_upgrade_request_status(ws));
 
-    // Cloud uses bounded 32768-byte PCM WebSocket frames. Allocate the
-    // matching receive buffer on the heap (the playback task stack is only
-    // 8 KiB) so each transport frame is drained in one read where possible.
+    // TLS/WebSocket reads may end on an arbitrary byte boundary, even when
+    // every cloud frame contains an even number of PCM bytes. Keep one extra
+    // byte so a split 16-bit sample is joined with the next read instead of
+    // being dropped (which would byte-shift all following PCM into noise).
     constexpr size_t kPcmReadBufferBytes = 32768;
     uint8_t* input = static_cast<uint8_t*>(heap_caps_calloc(
-        1, kPcmReadBufferBytes, MALLOC_CAP_8BIT));
+        1, kPcmReadBufferBytes + 1, MALLOC_CAP_8BIT));
     if (!input) {
         esp_transport_close(ws);
         esp_transport_destroy(ws);
@@ -171,6 +172,8 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
     bool output_enabled = false;
     int observed_pa_level = -1;
     int read_result = 0;
+    bool has_partial_sample = false;
+    uint8_t partial_sample = 0;
     while (!stop_requested_) {
         const int64_t read_started_us = esp_timer_get_time();
         // The cloud keeps the socket open after stream_end, so a short read
@@ -211,9 +214,23 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
             ESP_LOGI(TAG, "PCM output enabled PA GPIO17=%d requested=%d set_err=%s volume=%u",
                      observed_pa_level, requested_pa_level, esp_err_to_name(pa_err), volume_percent);
         }
-        const int samples = read_result / 2;
+        size_t pcm_bytes = static_cast<size_t>(read_result);
+        if (has_partial_sample) {
+            std::memmove(input + 1, input, pcm_bytes);
+            input[0] = partial_sample;
+            ++pcm_bytes;
+            has_partial_sample = false;
+        }
+        if ((pcm_bytes & 1U) != 0) {
+            partial_sample = input[pcm_bytes - 1];
+            --pcm_bytes;
+            has_partial_sample = true;
+        }
+        const int samples = static_cast<int>(pcm_bytes / 2);
         const int64_t write_started_us = esp_timer_get_time();
-        const int written = AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples);
+        const int written = samples > 0
+            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
+            : 0;
         output_write_us += esp_timer_get_time() - write_started_us;
         if (written != samples) ESP_LOGW(TAG, "PCM short write requested=%d written=%d", samples, written);
         total_bytes += static_cast<size_t>(read_result);
@@ -235,7 +252,11 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
              (unsigned)binary_frames,
              first_binary_us == 0 ? -1LL : (first_binary_us - started_us) / 1000,
              receive_wait_us / 1000, output_write_us / 1000);
-    return stop_requested_ ? ESP_ERR_INVALID_STATE : (read_result < 0 ? ESP_FAIL : ESP_OK);
+    if (has_partial_sample) {
+        ESP_LOGW(TAG, "PCM stream ended with an incomplete 16-bit sample");
+    }
+    return stop_requested_ ? ESP_ERR_INVALID_STATE
+                           : (read_result < 0 || has_partial_sample ? ESP_FAIL : ESP_OK);
 }
 
 esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_percent) {
@@ -271,7 +292,7 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
         ESP_LOGW(TAG, "unsupported WAV; expected PCM 16-bit mono");
         esp_http_client_close(client); esp_http_client_cleanup(client); return ESP_ERR_NOT_SUPPORTED;
     }
-    uint8_t input[1024] = {};
+    uint8_t input[1025] = {};
     int read = 0;
     const int scale = volume_percent;
     AudioCodec_EnableOutput(codec_, true);
@@ -280,12 +301,27 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
              gpio_get_level(AUDIO_CODEC_PA_PIN), esp_err_to_name(pa_err), scale);
     AudioCodec_SetOutputVolume(codec_, scale);
     size_t total_bytes = 0;
-    while (!stop_requested_ && (read = esp_http_client_read(client, reinterpret_cast<char*>(input), sizeof(input))) > 0) {
+    bool has_partial_sample = false;
+    uint8_t partial_sample = 0;
+    while (!stop_requested_ &&
+           (read = esp_http_client_read(client, reinterpret_cast<char*>(input), 1024)) > 0) {
         total_bytes += static_cast<size_t>(read);
-        int samples = read / 2;
-        auto* pcm = reinterpret_cast<int16_t*>(input);
-        for (int i = 0; i < samples; ++i) pcm[i] = static_cast<int16_t>((pcm[i] * scale) / 100);
-        const int written = AudioCodec_OutputData(codec_, pcm, samples);
+        size_t pcm_bytes = static_cast<size_t>(read);
+        if (has_partial_sample) {
+            std::memmove(input + 1, input, pcm_bytes);
+            input[0] = partial_sample;
+            ++pcm_bytes;
+            has_partial_sample = false;
+        }
+        if ((pcm_bytes & 1U) != 0) {
+            partial_sample = input[pcm_bytes - 1];
+            --pcm_bytes;
+            has_partial_sample = true;
+        }
+        const int samples = static_cast<int>(pcm_bytes / 2);
+        const int written = samples > 0
+            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
+            : 0;
         if (written != samples) {
             ESP_LOGW(TAG, "I2S/codec short write requested=%d written=%d", samples, written);
         }
@@ -297,7 +333,8 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
     ESP_LOGI(TAG, "WAV stream bytes=%u read_result=%d final_PA_GPIO17=%d elapsed_ms=%lld",
              (unsigned)total_bytes, read, gpio_get_level(AUDIO_CODEC_PA_PIN),
              (esp_timer_get_time() - started_us) / 1000);
-    return stop_requested_ ? ESP_ERR_INVALID_STATE : (err == ESP_OK ? ESP_OK : err);
+    return stop_requested_ ? ESP_ERR_INVALID_STATE
+                           : (read < 0 || has_partial_sample ? ESP_FAIL : ESP_OK);
 }
 
 esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
@@ -424,45 +461,18 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
         return recv(sock, destination, wanted, 0);
     };
 
+    // Stream through a bounded buffer. The GitHub Actions image intentionally
+    // does not require PSRAM; allocating the complete WAV made normal TTS
+    // clips fail with ESP_ERR_NO_MEM while MQTT/TLS were resident.
+    constexpr size_t kWavBufferBytes = 8192;
     uint8_t* pcm_buffer = static_cast<uint8_t*>(heap_caps_malloc(
-        audio_remaining, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        kWavBufferBytes + 1, MALLOC_CAP_8BIT));
     if (!pcm_buffer) {
-        pcm_buffer = static_cast<uint8_t*>(heap_caps_malloc(audio_remaining, MALLOC_CAP_8BIT));
-    }
-    if (!pcm_buffer) {
-        ESP_LOGE(TAG, "WAV PCM buffer allocation failed, bytes=%u", static_cast<unsigned>(audio_remaining));
+        ESP_LOGE(TAG, "WAV stream buffer allocation failed, bytes=%u",
+                 static_cast<unsigned>(kWavBufferBytes + 1));
         close(sock);
         return ESP_ERR_NO_MEM;
     }
-
-    const int64_t download_started_us = esp_timer_get_time();
-    size_t downloaded = 0;
-    int read = 0;
-    while (!stop_requested_ && downloaded < audio_remaining &&
-           (read = read_some(reinterpret_cast<char*>(pcm_buffer + downloaded),
-                             std::min(static_cast<size_t>(4096), audio_remaining - downloaded))) > 0) {
-        downloaded += static_cast<size_t>(read);
-        esp_task_wdt_reset();
-        if ((downloaded & 0x3fff) < static_cast<size_t>(read)) {
-            ESP_LOGI(TAG, "WAV raw download progress=%u/%u",
-                     static_cast<unsigned>(downloaded), static_cast<unsigned>(audio_remaining));
-        }
-    }
-    close(sock);
-    if (stop_requested_) {
-        heap_caps_free(pcm_buffer);
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (downloaded != audio_remaining) {
-        ESP_LOGW(TAG, "WAV download incomplete bytes=%u/%u read_result=%d",
-                 static_cast<unsigned>(downloaded), static_cast<unsigned>(audio_remaining), read);
-        heap_caps_free(pcm_buffer);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "WAV raw download_done bytes=%u download_ms=%lld",
-             static_cast<unsigned>(downloaded),
-             (esp_timer_get_time() - download_started_us) / 1000);
 
     const int scale = volume_percent;
     AudioCodec_EnableOutput(codec_, true);
@@ -470,21 +480,57 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
     const esp_err_t pa_err = gpio_set_level(AUDIO_CODEC_PA_PIN, 1);
     ESP_LOGI(TAG, "WAV raw playback output enabled PA GPIO17=%d set_err=%s volume=%d",
              gpio_get_level(AUDIO_CODEC_PA_PIN), esp_err_to_name(pa_err), scale);
+
+    size_t downloaded = 0;
     size_t played = 0;
-    while (!stop_requested_ && played < downloaded) {
-        const size_t chunk = std::min(static_cast<size_t>(1024), (downloaded - played) / 2);
-        auto* pcm = reinterpret_cast<int16_t*>(pcm_buffer + played);
-        for (size_t i = 0; i < chunk; ++i) pcm[i] = static_cast<int16_t>((pcm[i] * scale) / 100);
-        const int written = AudioCodec_OutputData(codec_, pcm, chunk);
-        if (written != static_cast<int>(chunk)) {
-            ESP_LOGW(TAG, "I2S/codec short write requested=%u written=%d",
-                     static_cast<unsigned>(chunk), written);
+    int read = 0;
+    bool has_partial_sample = false;
+    uint8_t partial_sample = 0;
+    while (!stop_requested_ && downloaded < audio_remaining &&
+           (read = read_some(reinterpret_cast<char*>(pcm_buffer),
+                             std::min(kWavBufferBytes, audio_remaining - downloaded))) > 0) {
+        downloaded += static_cast<size_t>(read);
+        size_t pcm_bytes = static_cast<size_t>(read);
+        if (has_partial_sample) {
+            std::memmove(pcm_buffer + 1, pcm_buffer, pcm_bytes);
+            pcm_buffer[0] = partial_sample;
+            ++pcm_bytes;
+            has_partial_sample = false;
         }
+        if ((pcm_bytes & 1U) != 0) {
+            partial_sample = pcm_buffer[pcm_bytes - 1];
+            --pcm_bytes;
+            has_partial_sample = true;
+        }
+        const size_t samples = pcm_bytes / 2;
+        const int written = samples > 0
+            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(pcm_buffer), samples)
+            : 0;
+        if (written != static_cast<int>(samples)) {
+            ESP_LOGW(TAG, "I2S/codec short write requested=%u written=%d",
+                     static_cast<unsigned>(samples), written);
+        }
+        played += static_cast<size_t>(std::max(written, 0)) * 2;
         esp_task_wdt_reset();
-        played += chunk * 2;
-        vTaskDelay(1);
+        if ((downloaded & 0x3fff) < static_cast<size_t>(read)) {
+            ESP_LOGI(TAG, "WAV raw stream progress=%u/%u",
+                     static_cast<unsigned>(downloaded),
+                     static_cast<unsigned>(audio_remaining));
+        }
     }
     AudioCodec_EnableOutput(codec_, false);
+    close(sock);
+    if (stop_requested_) {
+        heap_caps_free(pcm_buffer);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (downloaded != audio_remaining || has_partial_sample) {
+        ESP_LOGW(TAG, "WAV stream incomplete bytes=%u/%u partial_sample=%d read_result=%d",
+                 static_cast<unsigned>(downloaded), static_cast<unsigned>(audio_remaining),
+                 has_partial_sample ? 1 : 0, read);
+        heap_caps_free(pcm_buffer);
+        return ESP_FAIL;
+    }
     heap_caps_free(pcm_buffer);
     ESP_LOGI(TAG, "WAV raw stream bytes=%u read_result=%d final_PA_GPIO17=%d elapsed_ms=%lld",
              static_cast<unsigned>(played), read, gpio_get_level(AUDIO_CODEC_PA_PIN),
