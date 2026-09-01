@@ -329,10 +329,10 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     load_persisted_settings();
 
-    // LCD 上电即初始化，显示启动状态
-    lcd_init();
-    lcd_print_line(0, "ESP32  BOOTING  ");
-    lcd_print_line(1, "Connecting WiFi ");
+    // LCD disabled for v13 debug (testing if lcd_init blocks boot)
+    // lcd_init();
+    // lcd_print_line(0, "ESP32  BOOTING  ");
+    // lcd_print_line(1, "Connecting WiFi ");
 
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
