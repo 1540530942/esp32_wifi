@@ -2,6 +2,7 @@
 #include "ota_updater.h"
 #include "audio_player.h"
 #include "mqtt_control_client.h"
+#include "hd44780.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -12,7 +13,6 @@
 #include "esp_sntp.h"
 #include "esp_http_client.h"
 #include "esp_task_wdt.h"
-#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -34,39 +34,28 @@ static constexpr char kTestAudioUrl[] =
 static int s_volume = 30;
 static AudioPlayer* s_audio_player = nullptr;
 static MqttControlClient* s_mqtt_control = nullptr;
-static std::string s_wifi_ssid;
-static std::string s_wifi_password;
-static uint32_t s_boot_count = 0;
-static uint32_t s_boot_id = 0;
-static bool s_clock_synced = false;
 
-static void delayed_restart_task(void*) {
-    vTaskDelay(pdMS_TO_TICKS(1800));
-    esp_restart();
-}
+// LCD 状态
+static char s_lcd_ip[16] = "---";
+static int  s_lcd_tick   = 0;
 
-static bool running_image_pending_verify() {
-    const esp_partition_t* running = esp_ota_get_running_partition();
-    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
-    return running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
-           state == ESP_OTA_IMG_PENDING_VERIFY;
+// 固件版本缩短：去掉 "esp32-wangyutang-" 前缀，剩余部分适合放 LCD
+static const char* lcd_firmware_label() {
+    const char* ver = CONFIG_DEVICE_FIRMWARE_VERSION;
+    static const char prefix[] = "esp32-wangyutang-";
+    if (std::strncmp(ver, prefix, sizeof(prefix) - 1) == 0) ver += sizeof(prefix) - 1;
+    return ver;
 }
 
 static void load_persisted_settings() {
     nvs_handle_t handle = 0;
-    if (nvs_open("settings", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_open("settings", NVS_READONLY, &handle) != ESP_OK) return;
     int32_t volume = 30;
     if (nvs_get_i32(handle, "volume", &volume) == ESP_OK) {
         s_volume = std::max(0, std::min(100, static_cast<int>(volume)));
     }
-    nvs_get_u32(handle, "boot_count", &s_boot_count);
-    ++s_boot_count;
-    nvs_set_u32(handle, "boot_count", s_boot_count);
-    nvs_commit(handle);
     nvs_close(handle);
-    ESP_LOGI(TAG, "restored volume=%d%% boot_count=%u boot_id=%08x",
-             s_volume, static_cast<unsigned>(s_boot_count),
-             static_cast<unsigned>(s_boot_id));
+    ESP_LOGI(TAG, "restored volume=%d%%", s_volume);
 }
 
 static void persist_volume() {
@@ -82,42 +71,13 @@ static void persist_volume() {
                                 esp_err_to_name(err));
 }
 
-static void load_persisted_network() {
-    s_wifi_ssid = CONFIG_DEVICE_WIFI_SSID;
-    s_wifi_password = CONFIG_DEVICE_WIFI_PASSWORD;
-    nvs_handle_t handle = 0;
-    if (nvs_open("network", NVS_READWRITE, &handle) != ESP_OK) return;
-    size_t ssid_len = 0;
-    size_t password_len = 0;
-    if (nvs_get_str(handle, "ssid", nullptr, &ssid_len) == ESP_OK && ssid_len > 1) {
-        std::string stored_ssid(ssid_len, '\0');
-        if (nvs_get_str(handle, "ssid", stored_ssid.data(), &ssid_len) == ESP_OK) {
-            stored_ssid.resize(ssid_len - 1);
-            s_wifi_ssid = stored_ssid;
-        }
-    }
-    if (nvs_get_str(handle, "password", nullptr, &password_len) == ESP_OK && password_len > 1) {
-        std::string stored_password(password_len, '\0');
-        if (nvs_get_str(handle, "password", stored_password.data(), &password_len) == ESP_OK) {
-            stored_password.resize(password_len - 1);
-            s_wifi_password = stored_password;
-        }
-    }
-    if (ssid_len == 0 && !s_wifi_ssid.empty()) {
-        nvs_set_str(handle, "ssid", s_wifi_ssid.c_str());
-        nvs_set_str(handle, "password", s_wifi_password.c_str());
-        nvs_commit(handle);
-        ESP_LOGI(TAG, "persisted Wi-Fi configuration for future OTA images");
-    }
-    nvs_close(handle);
-    ESP_LOGI(TAG, "network configuration ready ssid=%s", s_wifi_ssid.c_str());
-}
-
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* arg) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         auto* event = static_cast<wifi_event_sta_disconnected_t*>(arg);
         ESP_LOGW(TAG, "Wi-Fi disconnected reason=%d", event ? event->reason : -1);
+        lcd_print_line(0, "ESP32  OFFLINE  ");
+        lcd_print_line(1, "                ");
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
         esp_wifi_connect();
     }
@@ -126,6 +86,8 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
         ESP_LOGI(TAG, "Wi-Fi got IP=" IPSTR " mask=" IPSTR " gw=" IPSTR,
                  IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.netmask),
                  IP2STR(&event->ip_info.gw));
+        esp_ip4addr_ntoa(&event->ip_info.ip, s_lcd_ip, sizeof(s_lcd_ip));
+        lcd_print_line(1, s_lcd_ip);
         xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -141,22 +103,16 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr));
     wifi_config_t config = {};
-    std::strncpy(reinterpret_cast<char*>(config.sta.ssid), s_wifi_ssid.c_str(), sizeof(config.sta.ssid));
-    std::strncpy(reinterpret_cast<char*>(config.sta.password), s_wifi_password.c_str(), sizeof(config.sta.password));
+    std::strncpy(reinterpret_cast<char*>(config.sta.ssid), CONFIG_DEVICE_WIFI_SSID, sizeof(config.sta.ssid));
+    std::strncpy(reinterpret_cast<char*>(config.sta.password), CONFIG_DEVICE_WIFI_PASSWORD, sizeof(config.sta.password));
     config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    // Keep the radio awake while the device maintains the long-lived cloud
-    // control link.  Some consumer APs/ISP gateways drop the first TCP
-    // exchange when an ESP station enters modem-sleep immediately after
-    // association.
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
 static bool sync_clock_from_http_date() {
-    // The site's HTTP redirect includes a Date header. Use it only to set the
-    // initial clock; all registration/audio traffic remains HTTPS.
     esp_http_client_config_t config = {};
     config.url = "http://www.wangyutang.cn/devices/api/health";
     config.timeout_ms = 8000;
@@ -170,8 +126,6 @@ static bool sync_clock_from_http_date() {
     if (date_header) {
         struct tm parsed = {};
         if (strptime(date_header, "%a, %d %b %Y %H:%M:%S GMT", &parsed)) {
-            // Convert the UTC date without relying on the optional timegm()
-            // libc extension, which is not provided by ESP-IDF newlib.
             int year = parsed.tm_year + 1900;
             unsigned month = static_cast<unsigned>(parsed.tm_mon + 1);
             year -= month <= 2;
@@ -192,10 +146,7 @@ static bool sync_clock_from_http_date() {
 }
 
 static void sync_clock() {
-    // HTTPS certificate validation requires a real wall clock. The ESP32
-    // starts at epoch 0 after reset, so synchronize before the first request.
     if (sync_clock_from_http_date()) {
-        s_clock_synced = true;
         ESP_LOGI(TAG, "clock synchronized from wangyutang HTTP Date header");
         return;
     }
@@ -214,10 +165,8 @@ static void sync_clock() {
         time(&now);
     }
     if (now >= 1700000000) {
-        s_clock_synced = true;
         ESP_LOGI(TAG, "SNTP time synchronized");
     } else {
-        s_clock_synced = false;
         ESP_LOGW(TAG, "SNTP time synchronization timed out; HTTPS may fail");
     }
 }
@@ -239,24 +188,10 @@ static std::string device_state() {
     cJSON_AddNumberToObject(state, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(state, "volume", s_volume);
     cJSON_AddNumberToObject(state, "reset_reason", (int)esp_reset_reason());
-    cJSON_AddNumberToObject(state, "boot_count", s_boot_count);
-    cJSON_AddNumberToObject(state, "boot_id", s_boot_id);
-    cJSON_AddBoolToObject(state, "clock_synced", s_clock_synced);
-    cJSON_AddNumberToObject(state, "epoch_s", static_cast<double>(time(nullptr)));
     cJSON_AddBoolToObject(state, "audio_playing",
                           s_audio_player != nullptr && s_audio_player->is_playing());
     cJSON_AddBoolToObject(state, "mqtt_connected",
                           s_mqtt_control != nullptr && s_mqtt_control->is_connected());
-    cJSON_AddNumberToObject(state, "mqtt_connect_attempts",
-                            s_mqtt_control ? s_mqtt_control->connect_attempts() : 0);
-    cJSON_AddNumberToObject(state, "mqtt_disconnect_count",
-                            s_mqtt_control ? s_mqtt_control->disconnect_count() : 0);
-    cJSON_AddNumberToObject(state, "mqtt_last_error_type",
-                            s_mqtt_control ? s_mqtt_control->last_error_type() : 0);
-    cJSON_AddNumberToObject(state, "mqtt_last_esp_error",
-                            s_mqtt_control ? s_mqtt_control->last_esp_error() : 0);
-    cJSON_AddNumberToObject(state, "mqtt_last_socket_errno",
-                            s_mqtt_control ? s_mqtt_control->last_socket_errno() : 0);
     cJSON_AddBoolToObject(state, "activated", s_audio_player != nullptr);
     cJSON_AddStringToObject(state, "audio_capability", "play_audio,stream_prepare,stop_audio");
     char* text = cJSON_PrintUnformatted(state);
@@ -299,9 +234,6 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             ESP_LOGI(TAG, "play_audio volume=%d", s_volume);
         }
         if (cJSON_IsString(url_item) && std::strncmp(url_item->valuestring, "https://", 8) == 0) {
-            // The ISP path currently blocks TCP/443.  The platform has a
-            // direct-IP HTTP listener; preserve the cloud URL contract while
-            // using that listener for this network.
             constexpr const char* kHttpsPrefix = "https://www.wangyutang.cn";
             if (std::strncmp(url_item->valuestring, kHttpsPrefix,
                              std::strlen(kHttpsPrefix)) == 0) {
@@ -366,38 +298,34 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             if (ota_args) cJSON_Delete(ota_args);
             return "failed|stage=ota error=missing_url";
         }
-        // Reuse the play_audio contract: rewrite the HTTPS cloud host to the
-        // direct-IP HTTP listener, since this ISP blocks TCP/443.
         std::string ota_url = ota_url_item->valuestring;
         constexpr const char* kOtaHttpsHost = "https://www.wangyutang.cn";
         if (ota_url.rfind(kOtaHttpsHost, 0) == 0) {
             ota_url = std::string("http://110.40.154.41") + ota_url.substr(std::strlen(kOtaHttpsHost));
         }
         if (ota_args) cJSON_Delete(ota_args);
-        esp_err_t ota_err = ota_run_from_url(ota_url.c_str(), [&cmd](size_t bytes, size_t total) {
-            if (!s_mqtt_control) return;
-            s_mqtt_control->publish_progress(
-                cmd.id, "ota", "stage=download bytes=" + std::to_string(bytes) +
-                " total=" + std::to_string(total));
-        });
+        esp_err_t ota_err = ota_run_from_url(ota_url.c_str());
         if (ota_err != ESP_OK) {
             return "failed|stage=ota error=" + std::string(esp_err_to_name(ota_err));
         }
-        ESP_LOGI(TAG, "OTA applied, ACK will be sent before delayed reboot");
-        if (xTaskCreate(delayed_restart_task, "ota_reboot", 2048, nullptr, 4, nullptr) != pdPASS) {
-            return "failed|stage=ota error=reboot_task_allocation";
-        }
-        return "done|event=ota_applied version=" + std::string(CONFIG_DEVICE_FIRMWARE_VERSION);
+        ESP_LOGI(TAG, "OTA applied, rebooting into new image");
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+        return "done";  // not reached
     }
     return "unsupported";
 }
 
 extern "C" void app_main() {
-    s_boot_id = esp_random();
     ESP_LOGI(TAG, "reset_reason=%d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(nvs_flash_init());
     load_persisted_settings();
-    load_persisted_network();
+
+    // LCD 上电即初始化，显示启动状态
+    lcd_init();
+    lcd_print_line(0, "ESP32  BOOTING  ");
+    lcd_print_line(1, "Connecting WiFi ");
+
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi connected");
@@ -418,25 +346,17 @@ extern "C" void app_main() {
         device_state,
         [&audio_player](const HubCommand& cmd) { return handle_command(cmd, &audio_player); }
     );
-    bool ota_pending_verify = running_image_pending_verify();
-    const int64_t ota_verify_started_us = esp_timer_get_time();
-    if (ota_pending_verify) ESP_LOGW(TAG, "OTA image pending health verification");
-    // Keep retrying registration so a transient WAN/DNS/TLS failure does not
-    // leave the device permanently absent from the platform.
     int retry_seconds = 10;
     while (hub.register_device() != ESP_OK) {
-        if (ota_pending_verify &&
-            esp_timer_get_time() - ota_verify_started_us > 120LL * 1000000LL) {
-            ESP_LOGE(TAG, "OTA registration health check timed out; rebooting for rollback");
-            esp_restart();
-        }
         ESP_LOGW(TAG, "device registration failed; retrying in %d seconds", retry_seconds);
         vTaskDelay(pdMS_TO_TICKS(retry_seconds * 1000));
         retry_seconds = std::min(retry_seconds * 2, 120);
     }
+    // 注册成功后切换为 ONLINE 状态
+    lcd_print_line(0, "ESP32  ONLINE   ");
+    lcd_print_line(1, s_lcd_ip);
+
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
-    // MQTT over WebSocket uses the already reachable public HTTP entrypoint.
-    // The current integration intentionally has no authentication.
     MqttControlClient mqtt("wss://www.wangyutang.cn/mqtt", CONFIG_DEVICE_ID,
                            [&audio_player](const HubCommand& cmd) {
                                return handle_command(cmd, &audio_player);
@@ -448,21 +368,18 @@ extern "C" void app_main() {
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
             hub.heartbeat();
+            // 每次心跳轮播 Line2：IP ↔ OTA版本（约每 5s 切换一次）
+            char line2[17];
+            if (s_lcd_tick % 2 == 0) {
+                snprintf(line2, sizeof(line2), "%-16s", s_lcd_ip);
+            } else {
+                snprintf(line2, sizeof(line2), "OTA:%-12s", lcd_firmware_label());
+            }
+            lcd_print_line(1, line2);
+            s_lcd_tick++;
         } else {
             ESP_LOGW(TAG, "Wi-Fi disconnected; heartbeat skipped");
         }
-        if (ota_pending_verify && mqtt.is_connected()) {
-            const esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
-            ESP_LOGI(TAG, "OTA health verification result=%s", esp_err_to_name(valid_err));
-            if (valid_err == ESP_OK) ota_pending_verify = false;
-        } else if (ota_pending_verify &&
-                   esp_timer_get_time() - ota_verify_started_us > 120LL * 1000000LL) {
-            ESP_LOGE(TAG, "OTA health verification timed out; rebooting for rollback");
-            esp_restart();
-        }
-        // MQTT is the primary control plane; keep HTTP heartbeat as a
-        // low-rate presence/fallback channel so it does not compete with a
-        // WSS PCM handshake for the ESP32 socket/TLS resources.
         vTaskDelay(pdMS_TO_TICKS(s_mqtt_control != nullptr &&
                                  s_mqtt_control->is_connected() ? 5000 : 2000));
     }

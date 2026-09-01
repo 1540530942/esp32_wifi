@@ -28,5 +28,13 @@
 
 #define BOOT_BUTTON_GPIO         GPIO_NUM_0
 
+// 1602A LCD（HD44780 4-bit 并口，GPIO3-8 均空闲）
+#define LCD_RS  GPIO_NUM_3
+#define LCD_E   GPIO_NUM_4
+#define LCD_D4  GPIO_NUM_5
+#define LCD_D5  GPIO_NUM_6
+#define LCD_D6  GPIO_NUM_7
+#define LCD_D7  GPIO_NUM_8
+
 
 #endif // _BOARD_CONFIG_H_
