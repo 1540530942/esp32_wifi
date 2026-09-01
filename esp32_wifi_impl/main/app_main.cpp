@@ -418,18 +418,23 @@ extern "C" void app_main() {
         device_state,
         [&audio_player](const HubCommand& cmd) { return handle_command(cmd, &audio_player); }
     );
+    bool ota_pending_verify = running_image_pending_verify();
+    const int64_t ota_verify_started_us = esp_timer_get_time();
+    if (ota_pending_verify) ESP_LOGW(TAG, "OTA image pending health verification");
     // Keep retrying registration so a transient WAN/DNS/TLS failure does not
     // leave the device permanently absent from the platform.
     int retry_seconds = 10;
     while (hub.register_device() != ESP_OK) {
+        if (ota_pending_verify &&
+            esp_timer_get_time() - ota_verify_started_us > 120LL * 1000000LL) {
+            ESP_LOGE(TAG, "OTA registration health check timed out; rebooting for rollback");
+            esp_restart();
+        }
         ESP_LOGW(TAG, "device registration failed; retrying in %d seconds", retry_seconds);
         vTaskDelay(pdMS_TO_TICKS(retry_seconds * 1000));
         retry_seconds = std::min(retry_seconds * 2, 120);
     }
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
-    bool ota_pending_verify = running_image_pending_verify();
-    const int64_t ota_verify_started_us = esp_timer_get_time();
-    if (ota_pending_verify) ESP_LOGW(TAG, "OTA image pending health verification");
     // MQTT over WebSocket uses the already reachable public HTTP entrypoint.
     // The current integration intentionally has no authentication.
     MqttControlClient mqtt("wss://www.wangyutang.cn/mqtt", CONFIG_DEVICE_ID,

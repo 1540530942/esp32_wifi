@@ -97,6 +97,7 @@ void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
         esp_mqtt_client_subscribe(client_, command_topic_.c_str(), 1);
         esp_mqtt_client_publish(client_, state_topic_.c_str(),
                                 "{\"status\":\"online\"}", 0, 1, 1);
+        flush_pending_status();
         break;
     case MQTT_EVENT_DATA: {
         const bool first = event->current_data_offset == 0;
@@ -228,8 +229,34 @@ void MqttControlClient::publish_status(const std::string& command_id,
     }
     char* json = cJSON_PrintUnformatted(root);
     if (json) {
-        esp_mqtt_client_publish(client_, ack_topic_.c_str(), json, 0, 1, 0);
+        const int message_id = connected_.load()
+            ? esp_mqtt_client_publish(client_, ack_topic_.c_str(), json, 0, 1, 0)
+            : -1;
+        std::lock_guard<std::mutex> lock(pending_status_mutex_);
+        if (message_id < 0) {
+            // Keep only the latest state per command: terminal done/failed
+            // naturally replaces an earlier accepted status.
+            pending_status_[command_id] = json;
+            ESP_LOGW(TAG, "queued ACK while MQTT offline command_id=%s status=%s",
+                     command_id.c_str(), status.c_str());
+        } else {
+            pending_status_.erase(command_id);
+        }
         cJSON_free(json);
     }
     cJSON_Delete(root);
+}
+
+void MqttControlClient::flush_pending_status() {
+    std::lock_guard<std::mutex> lock(pending_status_mutex_);
+    for (auto it = pending_status_.begin(); it != pending_status_.end();) {
+        const int message_id = esp_mqtt_client_publish(
+            client_, ack_topic_.c_str(), it->second.c_str(), 0, 1, 0);
+        if (message_id < 0) {
+            ++it;
+            continue;
+        }
+        ESP_LOGI(TAG, "replayed queued ACK command_id=%s", it->first.c_str());
+        it = pending_status_.erase(it);
+    }
 }

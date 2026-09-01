@@ -5,6 +5,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <map>
 #include <set>
 #include <string>
 
@@ -38,6 +39,7 @@ private:
                         const std::string& message = {},
                         const std::string& action = {},
                         const std::string& stream_id = {});
+    void flush_pending_status();
 
     std::string broker_uri_;
     std::string device_id_;
@@ -56,4 +58,6 @@ private:
     std::atomic<int> last_socket_errno_{0};
     std::mutex seen_mutex_;
     std::set<std::string> seen_commands_;
+    std::mutex pending_status_mutex_;
+    std::map<std::string, std::string> pending_status_;
 };
