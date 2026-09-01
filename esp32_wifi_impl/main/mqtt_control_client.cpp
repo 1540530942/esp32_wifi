@@ -85,8 +85,14 @@ void MqttControlClient::event_handler(void* handler_args, esp_event_base_t,
 void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
     if (!event) return;
     switch (event->event_id) {
+    case MQTT_EVENT_BEFORE_CONNECT:
+        connect_attempts_.fetch_add(1);
+        break;
     case MQTT_EVENT_CONNECTED:
         connected_.store(true);
+        last_error_type_.store(0);
+        last_esp_error_.store(0);
+        last_socket_errno_.store(0);
         ESP_LOGI(TAG, "connected broker=%s", broker_uri_.c_str());
         esp_mqtt_client_subscribe(client_, command_topic_.c_str(), 1);
         esp_mqtt_client_publish(client_, state_topic_.c_str(),
@@ -106,11 +112,15 @@ void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
     }
     case MQTT_EVENT_DISCONNECTED:
         connected_.store(false);
+        disconnect_count_.fetch_add(1);
         ESP_LOGW(TAG, "disconnected; MQTT client will reconnect");
         break;
     case MQTT_EVENT_ERROR:
         if (event->error_handle) {
             const auto* error = event->error_handle;
+            last_error_type_.store(error->error_type);
+            last_esp_error_.store(error->esp_tls_last_esp_err);
+            last_socket_errno_.store(error->esp_transport_sock_errno);
             ESP_LOGW(TAG, "MQTT error type=%d esp_err=0x%x tls_err=0x%x tls_flags=0x%x sock_errno=%d",
                      error->error_type, error->esp_tls_last_esp_err,
                      error->esp_tls_stack_err, error->esp_tls_cert_verify_flags,

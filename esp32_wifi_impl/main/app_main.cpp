@@ -36,6 +36,9 @@ static AudioPlayer* s_audio_player = nullptr;
 static MqttControlClient* s_mqtt_control = nullptr;
 static std::string s_wifi_ssid;
 static std::string s_wifi_password;
+static uint32_t s_boot_count = 0;
+static uint32_t s_boot_id = 0;
+static bool s_clock_synced = false;
 
 static void delayed_restart_task(void*) {
     vTaskDelay(pdMS_TO_TICKS(1800));
@@ -51,13 +54,19 @@ static bool running_image_pending_verify() {
 
 static void load_persisted_settings() {
     nvs_handle_t handle = 0;
-    if (nvs_open("settings", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_open("settings", NVS_READWRITE, &handle) != ESP_OK) return;
     int32_t volume = 30;
     if (nvs_get_i32(handle, "volume", &volume) == ESP_OK) {
         s_volume = std::max(0, std::min(100, static_cast<int>(volume)));
     }
+    nvs_get_u32(handle, "boot_count", &s_boot_count);
+    ++s_boot_count;
+    nvs_set_u32(handle, "boot_count", s_boot_count);
+    nvs_commit(handle);
     nvs_close(handle);
-    ESP_LOGI(TAG, "restored volume=%d%%", s_volume);
+    ESP_LOGI(TAG, "restored volume=%d%% boot_count=%u boot_id=%08x",
+             s_volume, static_cast<unsigned>(s_boot_count),
+             static_cast<unsigned>(s_boot_id));
 }
 
 static void persist_volume() {
@@ -186,6 +195,7 @@ static void sync_clock() {
     // HTTPS certificate validation requires a real wall clock. The ESP32
     // starts at epoch 0 after reset, so synchronize before the first request.
     if (sync_clock_from_http_date()) {
+        s_clock_synced = true;
         ESP_LOGI(TAG, "clock synchronized from wangyutang HTTP Date header");
         return;
     }
@@ -204,8 +214,10 @@ static void sync_clock() {
         time(&now);
     }
     if (now >= 1700000000) {
+        s_clock_synced = true;
         ESP_LOGI(TAG, "SNTP time synchronized");
     } else {
+        s_clock_synced = false;
         ESP_LOGW(TAG, "SNTP time synchronization timed out; HTTPS may fail");
     }
 }
@@ -227,10 +239,24 @@ static std::string device_state() {
     cJSON_AddNumberToObject(state, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(state, "volume", s_volume);
     cJSON_AddNumberToObject(state, "reset_reason", (int)esp_reset_reason());
+    cJSON_AddNumberToObject(state, "boot_count", s_boot_count);
+    cJSON_AddNumberToObject(state, "boot_id", s_boot_id);
+    cJSON_AddBoolToObject(state, "clock_synced", s_clock_synced);
+    cJSON_AddNumberToObject(state, "epoch_s", static_cast<double>(time(nullptr)));
     cJSON_AddBoolToObject(state, "audio_playing",
                           s_audio_player != nullptr && s_audio_player->is_playing());
     cJSON_AddBoolToObject(state, "mqtt_connected",
                           s_mqtt_control != nullptr && s_mqtt_control->is_connected());
+    cJSON_AddNumberToObject(state, "mqtt_connect_attempts",
+                            s_mqtt_control ? s_mqtt_control->connect_attempts() : 0);
+    cJSON_AddNumberToObject(state, "mqtt_disconnect_count",
+                            s_mqtt_control ? s_mqtt_control->disconnect_count() : 0);
+    cJSON_AddNumberToObject(state, "mqtt_last_error_type",
+                            s_mqtt_control ? s_mqtt_control->last_error_type() : 0);
+    cJSON_AddNumberToObject(state, "mqtt_last_esp_error",
+                            s_mqtt_control ? s_mqtt_control->last_esp_error() : 0);
+    cJSON_AddNumberToObject(state, "mqtt_last_socket_errno",
+                            s_mqtt_control ? s_mqtt_control->last_socket_errno() : 0);
     cJSON_AddBoolToObject(state, "activated", s_audio_player != nullptr);
     cJSON_AddStringToObject(state, "audio_capability", "play_audio,stream_prepare,stop_audio");
     char* text = cJSON_PrintUnformatted(state);
@@ -367,6 +393,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
 }
 
 extern "C" void app_main() {
+    s_boot_id = esp_random();
     ESP_LOGI(TAG, "reset_reason=%d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(nvs_flash_init());
     load_persisted_settings();

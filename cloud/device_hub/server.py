@@ -53,11 +53,11 @@ TEST_AUDIO_PATH = AUDIO_DIR / "test-morning-princess.wav"
 
 # 契约常量
 HEARTBEAT_INTERVAL_S = 5           # 建议心跳周期,注册回执下发给设备
-OFFLINE_AFTER_S = 15               # 3× 心跳无上报 -> offline(容忍偶发丢包)
+OFFLINE_AFTER_S = 30               # HTTPS/TLS 心跳偶尔超过 15s，避免冷启动/握手期间误报
 MAX_LOGS = 200                     # 每设备环形日志上限
 MAX_COMMAND_HISTORY = 50           # 每设备已完成指令保留上限
 KNOWN_ACTIONS = {"reboot", "set_volume", "identify", "ota", "play_audio", "stop_audio", "stream_prepare"}
-OFFLINE_ALERT_AFTER_S = 60    # 超过此时长无心跳 → 记录告警（4× OFFLINE_AFTER_S，过滤偶发断联）
+OFFLINE_ALERT_AFTER_S = 90    # 超过此时长无心跳 → 记录告警（过滤 TLS 短暂阻塞）
 ALERTS_FILE = DATA_DIR / "alerts.jsonl"
 MAX_ALERTS = 500
 
@@ -198,6 +198,16 @@ def _enqueue_mqtt_command(device_id: str, command_id: str, action: str,
         "command_id": command_id, "id": command_id, "action": action,
         "args": args, "text": text, "published_at": time.time(),
     })
+
+
+def _device_mqtt_ready(device_id: str) -> bool:
+    """Use heartbeat fallback when the latest device state says WSS is down."""
+    with DATA_LOCK:
+        record = _load().get(device_id)
+        if not record:
+            return False
+        recent = time.time() - float(record.get("last_seen", 0)) <= OFFLINE_AFTER_S
+        return recent and bool(record.get("state", {}).get("mqtt_connected"))
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +563,7 @@ def speak(device_id: str, req: SpeakReq) -> Any:
         })
         data[device_id] = rec
         _save(data)
-    published = _enqueue_mqtt_command(
+    published = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
         device_id, command_id, "play_audio",
         {"url": audio_url, "volume": req.volume}, req.text,
     )
@@ -620,7 +630,9 @@ def test_audio(device_id: str, req: TestAudioReq) -> Any:
         data[device_id] = rec
         _save(data)
     command = {"id": command_id, "action": "play_audio", "args": {"url": audio_url, "volume": req.volume}, "text": TEST_AUDIO_TEXT}
-    _mqtt_enqueue_ok = _enqueue_mqtt_command(device_id, command_id, command["action"], command["args"], TEST_AUDIO_TEXT)
+    _mqtt_enqueue_ok = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
+        device_id, command_id, command["action"], command["args"], TEST_AUDIO_TEXT,
+    )
     if _mqtt_enqueue_ok:
         with DATA_LOCK:
             data = _load()
@@ -681,7 +693,9 @@ def speak_pcm(device_id: str, req: SpeakPcmReq) -> Any:
         # command from being delivered once by MQTT and once by heartbeat.
         rec.setdefault("commands", []).append({"id": command_id, "action": "stream_prepare", "text": req.text, "args": args, "status": "dispatching", "created_at": time.time(), "dispatched_at": 0.0, "done_at": 0.0, "message": "", "transport": "mqtt"})
         _save(data)
-    published = _enqueue_mqtt_command(device_id, command_id, "stream_prepare", args, req.text)
+    published = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
+        device_id, command_id, "stream_prepare", args, req.text,
+    )
     with DATA_LOCK:
         data = _load(); rec = data[device_id]
         for c in rec.get("commands", []):

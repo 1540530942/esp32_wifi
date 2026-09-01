@@ -19,6 +19,11 @@ public:
     esp_err_t start();
     esp_err_t stop();
     bool is_connected() const { return connected_.load(); }
+    uint32_t connect_attempts() const { return connect_attempts_.load(); }
+    uint32_t disconnect_count() const { return disconnect_count_.load(); }
+    int last_error_type() const { return last_error_type_.load(); }
+    int last_esp_error() const { return last_esp_error_.load(); }
+    int last_socket_errno() const { return last_socket_errno_.load(); }
     void publish_progress(const std::string& command_id, const std::string& action,
                           const std::string& message);
 
@@ -44,6 +49,11 @@ private:
     esp_mqtt_client_handle_t client_ = nullptr;
     std::string incoming_payload_;
     std::atomic<bool> connected_{false};
+    std::atomic<uint32_t> connect_attempts_{0};
+    std::atomic<uint32_t> disconnect_count_{0};
+    std::atomic<int> last_error_type_{0};
+    std::atomic<int> last_esp_error_{0};
+    std::atomic<int> last_socket_errno_{0};
     std::mutex seen_mutex_;
     std::set<std::string> seen_commands_;
 };
