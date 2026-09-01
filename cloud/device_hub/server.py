@@ -717,17 +717,14 @@ async def pcm_websocket(websocket: WebSocket, device_id: str, stream_id: str = "
         stream_started = time.monotonic()
         frame_count = 0
         # 20 ms of 24 kHz / 16-bit / mono PCM. Small, even-sized frames avoid
-        # large TLS/WS fragmentation and give the device a stable jitter
-        # margin. Send the first 100 ms immediately, then pace at real time.
+        # large TLS/WS fragmentation. The device's blocking I2S writes and
+        # the TCP receive window provide playback backpressure, so adding a
+        # second real-time sleep here would nearly double playback duration.
         packet_bytes = 24000 * 2 * 20 // 1000
-        frame_interval_s = 0.020
-        prebuffer_frames = 5
         await websocket.send_json({"event": "stream_start", "total_bytes": len(pcm), "audio": {"codec": "pcm_s16le", "sample_rate": 24000, "channels": 1, "frame_ms": 20, "packet_bytes": packet_bytes}})
         first_frame_at = time.monotonic()
-        for frame_index, offset in enumerate(range(0, len(pcm), packet_bytes)):
+        for offset in range(0, len(pcm), packet_bytes):
             await websocket.send_bytes(pcm[offset:offset + packet_bytes])
-            if frame_index + 1 >= prebuffer_frames and offset + packet_bytes < len(pcm):
-                await asyncio.sleep(frame_interval_s)
         frame_count = (len(pcm) + packet_bytes - 1) // packet_bytes if pcm else 0
         stream_elapsed_ms = int((time.monotonic() - stream_started) * 1000)
         first_frame_ms = int((first_frame_at - stream_started) * 1000)
