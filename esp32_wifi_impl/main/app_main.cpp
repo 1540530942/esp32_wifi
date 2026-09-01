@@ -303,6 +303,14 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         if (ota_url.rfind(kOtaHttpsHost, 0) == 0) {
             ota_url = std::string("http://110.40.154.41") + ota_url.substr(std::strlen(kOtaHttpsHost));
         }
+        // Skip OTA if already on target version to prevent retained-command reboot loop
+        cJSON* ver_item = cJSON_GetObjectItem(ota_args, "version");
+        if (cJSON_IsString(ver_item) &&
+            std::string(ver_item->valuestring) == CONFIG_DEVICE_FIRMWARE_VERSION) {
+            cJSON_Delete(ota_args);
+            ESP_LOGI(TAG, "OTA: already on target version %s, skipping", CONFIG_DEVICE_FIRMWARE_VERSION);
+            return std::string("done|ota_skipped=already_on_") + CONFIG_DEVICE_FIRMWARE_VERSION;
+        }
         if (ota_args) cJSON_Delete(ota_args);
         esp_err_t ota_err = ota_run_from_url(ota_url.c_str());
         if (ota_err != ESP_OK) {

@@ -10,7 +10,7 @@ CONFIG_DEVICE_WIFI_PASSWORD=""
 CONFIG_DEVICE_HUB_BASE_URL="https://www.wangyutang.cn/devices/api"
 CONFIG_DEVICE_ID="esp32-s3-walle"
 CONFIG_DEVICE_NAME="WALLE ESP32"
-CONFIG_DEVICE_FIRMWARE_VERSION="esp32-wangyutang-v11-lcd"
+CONFIG_DEVICE_FIRMWARE_VERSION="esp32-wangyutang-v12-lcd"
 # The bundled ESP-IDF Wi-Fi library lacks the WPA3 RSNXE symbol; this device
 # uses WPA2-PSK and does not need WPA3 support for the v1 integration.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
