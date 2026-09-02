@@ -76,8 +76,8 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         auto* event = static_cast<wifi_event_sta_disconnected_t*>(arg);
         ESP_LOGW(TAG, "Wi-Fi disconnected reason=%d", event ? event->reason : -1);
-        // lcd_print_line(0, "ESP32  OFFLINE  ");  // v14 debug: disabled
-        // lcd_print_line(1, "                ");
+        lcd_print_line(0, "ESP32  OFFLINE  ");
+        lcd_print_line(1, "                ");
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
         esp_wifi_connect();
     }
@@ -87,7 +87,7 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
                  IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.netmask),
                  IP2STR(&event->ip_info.gw));
         esp_ip4addr_ntoa(&event->ip_info.ip, s_lcd_ip, sizeof(s_lcd_ip));
-        // lcd_print_line(1, s_lcd_ip);  // v14 debug: disabled
+        lcd_print_line(1, s_lcd_ip);
         xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -329,10 +329,10 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     load_persisted_settings();
 
-    // LCD disabled for v13 debug (testing if lcd_init blocks boot)
-    // lcd_init();
-    // lcd_print_line(0, "ESP32  BOOTING  ");
-    // lcd_print_line(1, "Connecting WiFi ");
+    // LCD enabled in v15 - JTAG disabled in sdkconfig to free GPIO 5-8
+    lcd_init();
+    lcd_print_line(0, "ESP32  BOOTING  ");
+    lcd_print_line(1, "Connecting WiFi ");
 
     init_wifi();
     xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
@@ -361,8 +361,8 @@ extern "C" void app_main() {
         retry_seconds = std::min(retry_seconds * 2, 120);
     }
     // 注册成功后切换为 ONLINE 状态
-    // lcd_print_line(0, "ESP32  ONLINE   ");  // v14 debug: disabled
-    // lcd_print_line(1, s_lcd_ip);  // v14 debug: disabled
+    lcd_print_line(0, "ESP32  ONLINE   ");
+    lcd_print_line(1, s_lcd_ip);
 
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
     MqttControlClient mqtt("wss://www.wangyutang.cn/mqtt", CONFIG_DEVICE_ID,
@@ -383,7 +383,7 @@ extern "C" void app_main() {
             } else {
                 snprintf(line2, sizeof(line2), "OTA:%-12s", lcd_firmware_label());
             }
-            // lcd_print_line(1, line2);  // v14 debug: disabled
+            lcd_print_line(1, line2);
             s_lcd_tick++;
         } else {
             ESP_LOGW(TAG, "Wi-Fi disconnected; heartbeat skipped");

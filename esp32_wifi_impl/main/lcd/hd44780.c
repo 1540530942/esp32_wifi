@@ -9,6 +9,8 @@
 
 #define LCD_COLS 16
 
+static bool s_lcd_ready = false;
+
 static void pulse_enable(void) {
     gpio_set_level(LCD_E, 1);
     esp_rom_delay_us(1);
@@ -62,9 +64,11 @@ void lcd_init(void) {
     send_cmd(0x06);  // entry mode: increment, no shift
     send_cmd(0x01);  // clear display
     vTaskDelay(pdMS_TO_TICKS(2));    // clear needs >1.52ms
+    s_lcd_ready = true;
 }
 
 void lcd_clear(void) {
+    if (!s_lcd_ready) return;
     send_cmd(0x01);
     vTaskDelay(pdMS_TO_TICKS(2));
 }
@@ -81,6 +85,7 @@ void lcd_print(const char *str) {
 }
 
 void lcd_print_line(int row, const char *str) {
+    if (!s_lcd_ready) return;
     char buf[LCD_COLS + 1];
     snprintf(buf, sizeof(buf), "%-*s", LCD_COLS, str ? str : "");
     lcd_set_cursor(0, row);
