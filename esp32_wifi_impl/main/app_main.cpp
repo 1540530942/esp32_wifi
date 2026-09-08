@@ -366,6 +366,31 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         esp_restart();
         return "done";  // not reached
     }
+    if (cmd.action == "aec_probe") {
+        if (player->is_playing()) return "failed|busy";
+        esp_err_t err = player->run_aec_reference_probe();
+        if (err != ESP_OK) {
+            return "failed|stage=aec_probe error=" + std::string(esp_err_to_name(err));
+        }
+        const auto& r = player->last_probe_result();
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+                 "done|silent_ch0=%.1f silent_ch1=%.1f play_ch0=%.1f play_ch1=%.1f "
+                 "ch1_delta=%.1f reference=%s",
+                 r.silent_rms0, r.silent_rms1, r.play_rms0, r.play_rms1,
+                 r.play_rms1 - r.silent_rms1, r.reference_is_real ? "REAL" : "FLOATING");
+        return std::string(buf);
+    }
+    if (cmd.action == "mic_asr_test") {
+        if (player->is_playing()) return "failed|busy";
+        cJSON* args = cJSON_Parse(cmd.args_json.c_str());
+        cJSON* secs = args ? cJSON_GetObjectItem(args, "seconds") : nullptr;
+        int seconds = cJSON_IsNumber(secs) ? std::max(1, std::min(10, (int)secs->valuedouble)) : 4;
+        if (args) cJSON_Delete(args);
+        esp_err_t err = player->run_mic_asr_test(seconds, s_volume);
+        if (err != ESP_OK) return "failed|stage=mic_asr error=" + player->last_error();
+        return "done|asr_text=" + player->last_asr_text();
+    }
     return "unsupported";
 }
 

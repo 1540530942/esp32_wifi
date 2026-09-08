@@ -822,6 +822,12 @@ esp_err_t AudioPlayer::run_aec_reference_probe() {
     heap_caps_free(tone);
     heap_caps_free(buf);
 
+    last_probe_result_ = {
+        static_cast<float>(silent_rms0), static_cast<float>(silent_rms1),
+        static_cast<float>(play_rms0), static_cast<float>(play_rms1),
+        (play_rms1 > silent_rms1 * 3.0 && play_rms1 > 50.0),
+    };
+
     ESP_LOGI(TAG, "aec_probe: SILENCE  ch0(mic)=%.1f ch1(ref)=%.1f", silent_rms0, silent_rms1);
     ESP_LOGI(TAG, "aec_probe: PLAYING  ch0(mic)=%.1f ch1(ref)=%.1f", play_rms0, play_rms1);
     ESP_LOGI(TAG, "aec_probe: ch1 delta=%.1f -> %s",

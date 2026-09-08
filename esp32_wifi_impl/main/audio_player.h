@@ -42,6 +42,14 @@ public:
     // by eye in the serial log. Does not touch run_mic_asr_test's path.
     esp_err_t run_aec_reference_probe();
 
+    // Populated by run_aec_reference_probe() on ESP_OK, so a remote caller
+    // (device-hub command) can read the measurement instead of the UART log.
+    struct AecProbeResult {
+        float silent_rms0 = 0, silent_rms1 = 0, play_rms0 = 0, play_rms1 = 0;
+        bool reference_is_real = false;
+    };
+    const AecProbeResult& last_probe_result() const { return last_probe_result_; }
+
 private:
     static void task_entry(void* arg);
     void play_task();
@@ -63,4 +71,5 @@ private:
     std::atomic<int> last_pcm_pa_level_{-1};
     std::string last_error_;
     std::string last_asr_text_;
+    AecProbeResult last_probe_result_{};
 };
