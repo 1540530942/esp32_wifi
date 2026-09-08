@@ -28,6 +28,7 @@ public:
     esp_err_t register_device();
     esp_err_t heartbeat();
     esp_err_t log_event(const std::string& level, const std::string& message);
+    esp_err_t boot_announce();
 
 private:
     esp_err_t post_json(const std::string& path, const std::string& body,

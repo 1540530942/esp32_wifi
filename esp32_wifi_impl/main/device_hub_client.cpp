@@ -211,6 +211,19 @@ esp_err_t DeviceHubClient::log_event(const std::string& level,
     return post_json("/log", body, nullptr);
 }
 
+
+esp_err_t DeviceHubClient::boot_announce() {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "device_id", device_id_.c_str());
+    char* text = cJSON_PrintUnformatted(root);
+    std::string body = text ? text : "{}";
+    cJSON_free(text);
+    cJSON_Delete(root);
+    esp_err_t err = post_json("/boot_announce", body, nullptr);
+    if (err == ESP_OK) ESP_LOGI(TAG, "boot_announce sent");
+    else ESP_LOGW(TAG, "boot_announce failed: %s", esp_err_to_name(err));
+    return err;
+}
 esp_err_t DeviceHubClient::heartbeat() {
     std::string state = state_provider_ ? state_provider_() : "{}";
     cJSON* root = cJSON_CreateObject();
