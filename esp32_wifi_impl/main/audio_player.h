@@ -17,6 +17,7 @@ public:
     esp_err_t play_pcm_url(const std::string& url, uint8_t volume_percent = 30,
                            int pa_level = 1);
     esp_err_t stop();
+    AudioCodec* codec() const { return codec_; }
     bool is_playing() const { return task_ != nullptr; }
     esp_err_t last_result() const { return last_result_; }
     const std::string& last_error() const { return last_error_; }

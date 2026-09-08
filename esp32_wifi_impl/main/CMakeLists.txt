@@ -3,7 +3,8 @@ idf_component_register(
          "mqtt_control_client.cpp" "ota_updater.cpp"
          "audio/audio_codec.c" "audio/codecs/box_audio_codec.c"
          "lcd/hd44780.c"
+         "afe_pipeline.c" "playback.c" "ws_client.c" "afe_board_shim.c"
     INCLUDE_DIRS "." "audio" "audio/codecs" "lcd"
     REQUIRES esp_wifi esp_https_ota app_update esp-tls esp_event esp_netif esp_http_client tcp_transport json nvs_flash driver mqtt
-             mbedtls esp_timer esp_codec_dev
+             mbedtls esp_timer esp_codec_dev esp-sr esp_websocket_client
 )

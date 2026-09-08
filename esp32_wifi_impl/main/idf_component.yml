@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.3"
+  # AFE (AEC + NS + VAD) for the full-duplex voice path.
+  espressif/esp-sr: "*"
+  # WebSocket client to audio_interact /ws/audio.
+  espressif/esp_websocket_client: "^1.2"

@@ -25,3 +25,51 @@ config DEVICE_FIRMWARE_VERSION
     default "esp32-wangyutang-v1"
 
 endmenu
+
+menu "AEC Full-Duplex Voice"
+
+config AEC_SERVER_URI
+    string "Cloud WebSocket URI (audio_interact /ws/audio)"
+    default "wss://www.wangyutang.cn/ws/audio"
+
+config AEC_AUDIO_TOKEN
+    string "X-Audio-Token header (empty = none)"
+    default ""
+
+config AEC_AFE_INPUT_FORMAT
+    string "AFE input channel format (M=mic R=ref N=unused, physical order)"
+    default "MR"
+    help
+      One char per codec input channel in physical order. BoxAudioCodec with
+      input_reference=true gives [mic, ref] -> "MR". Must match the hardware or
+      AEC will cancel the wrong signal.
+
+config AEC_SOFTWARE_REF
+    bool "Use software AEC reference (no hardware speaker loopback into the ADC)"
+    default n
+
+config AEC_LOCAL_BARGEIN
+    bool "On-device (level-1) barge-in via AFE VAD"
+    default y
+
+config AEC_BARGEIN_ONSET_GRACE_MS
+    int "Ignore barge-in for the first N ms of a TTS turn (AEC converge)"
+    default 500
+
+config AEC_BARGEIN_SPEECH_FRAMES
+    int "Sustained AFE speech frames to trigger local duck"
+    default 4
+
+config AEC_SPEAKER_VOLUME
+    int "AEC-path speaker volume 0..100"
+    default 75
+
+config AEC_DUCK_VOLUME_PCT
+    int "Ducked volume (percent of normal) on local barge-in"
+    default 25
+
+config AEC_ENABLE
+    bool "Enable AFE acoustic echo cancellation (off = pass-through, for A/B)"
+    default y
+
+endmenu

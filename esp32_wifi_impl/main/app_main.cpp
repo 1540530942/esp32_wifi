@@ -5,6 +5,13 @@
 #include "hd44780.h"
 #include "audio_board_config.h"
 
+extern "C" {
+#include "afe_board.h"
+#include "playback.h"
+#include "ws_client.h"
+#include "afe_pipeline.h"
+}
+
 #include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -246,6 +253,13 @@ static void mic_asr_button_task(void* /*arg*/) {
     }
 }
 
+static void aec_on_clean_audio(const int16_t* pcm, size_t bytes) {
+    ws_client_send_audio(pcm, bytes);
+}
+static void aec_on_tts_state(bool playing) {
+    ws_client_report_tts_state(playing);
+}
+
 static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     ESP_LOGI(TAG, "executing command=%s args=%s", cmd.action.c_str(), cmd.args_json.c_str());
     if (cmd.action == "reboot") {
@@ -419,6 +433,17 @@ extern "C" void app_main() {
     AudioPlayer audio_player;
     s_audio_player = &audio_player;
     xTaskCreate(mic_asr_button_task, "mic_asr_btn", 8192, nullptr, 5, nullptr);
+
+    // esp-sr AFE full-duplex voice path (mic -> AEC -> /ws/audio, TTS back).
+    afe_board_bind_codec(audio_player.codec());
+    if (board_init() == ESP_OK &&
+        playback_init(aec_on_tts_state) == ESP_OK &&
+        ws_client_start() == ESP_OK &&
+        afe_pipeline_init(aec_on_clean_audio) == ESP_OK) {
+        ESP_LOGI(TAG, "AEC full-duplex pipeline started");
+    } else {
+        ESP_LOGE(TAG, "AEC pipeline init failed; continuing half-duplex");
+    }
     DeviceHubClient hub(
         CONFIG_DEVICE_HUB_BASE_URL,
         CONFIG_DEVICE_ID,
