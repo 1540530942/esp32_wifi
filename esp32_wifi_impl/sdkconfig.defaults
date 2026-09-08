@@ -10,7 +10,7 @@ CONFIG_DEVICE_WIFI_PASSWORD=""
 CONFIG_DEVICE_HUB_BASE_URL="https://www.wangyutang.cn/devices/api"
 CONFIG_DEVICE_ID="esp32-s3-walle"
 CONFIG_DEVICE_NAME="WALLE ESP32"
-CONFIG_DEVICE_FIRMWARE_VERSION="esp32-wangyutang-v15-lcd"
+CONFIG_DEVICE_FIRMWARE_VERSION="esp32-wangyutang-v20-mic"
 # The bundled ESP-IDF Wi-Fi library lacks the WPA3 RSNXE symbol; this device
 # uses WPA2-PSK and does not need WPA3 support for the v1 integration.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
@@ -23,3 +23,11 @@ CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=n
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
+
+# Enable octal PSRAM (8MB, AP_3v3) -- confirmed present on hardware but never
+# turned on before; needed for run_mic_asr_test's mic-buffer allocations.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
