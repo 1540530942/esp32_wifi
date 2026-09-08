@@ -3,11 +3,14 @@
 #include "audio_player.h"
 #include "mqtt_control_client.h"
 #include "hd44780.h"
+#include "audio_board_config.h"
 
+#include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_sntp.h"
@@ -201,6 +204,48 @@ static std::string device_state() {
     return result;
 }
 
+// Mic + ASR + broadcast validation: hold the physical BOOT button (GPIO0,
+// unused elsewhere in this firmware) to record 4s, send to cloud ASR, and
+// speak the recognized text back. Polled (not interrupt-driven) since a
+// button-press response time of ~100ms is plenty for a manual hardware test.
+static void mic_asr_button_task(void* /*arg*/) {
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&io_conf);
+    bool was_pressed = false;
+    int64_t press_started_ms = 0;
+    for (;;) {
+        const bool pressed = gpio_get_level(BOOT_BUTTON_GPIO) == 0;  // active-low
+        if (pressed && !was_pressed) {
+            vTaskDelay(pdMS_TO_TICKS(30));  // debounce
+            if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
+                press_started_ms = esp_timer_get_time() / 1000;
+            }
+        } else if (!pressed && was_pressed && press_started_ms > 0) {
+            const int64_t held_ms = esp_timer_get_time() / 1000 - press_started_ms;
+            press_started_ms = 0;
+            if (s_audio_player != nullptr && !s_audio_player->is_playing()) {
+                if (held_ms >= 800) {
+                    // Long press: hardware-AEC-reference diagnostic (see
+                    // docs/logs/ for what this measures and why).
+                    ESP_LOGI(TAG, "BOOT button long-press (%lldms) -> aec_reference_probe", held_ms);
+                    esp_err_t err = s_audio_player->run_aec_reference_probe();
+                    ESP_LOGI(TAG, "aec_reference_probe result=%s", esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "BOOT button short-press (%lldms) -> mic_asr_test", held_ms);
+                    esp_err_t err = s_audio_player->run_mic_asr_test(4, s_volume);
+                    ESP_LOGI(TAG, "mic_asr_test result=%s asr_text=\"%s\"",
+                             esp_err_to_name(err), s_audio_player->last_asr_text().c_str());
+                }
+            }
+        }
+        was_pressed = pressed;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     ESP_LOGI(TAG, "executing command=%s args=%s", cmd.action.c_str(), cmd.args_json.c_str());
     if (cmd.action == "reboot") {
@@ -344,8 +389,11 @@ extern "C" void app_main() {
         wait_for_default_gateway();
     }
     sync_clock();
+    // Mark OTA partition as valid so new OTA can be started
+    esp_ota_mark_app_valid_cancel_rollback();
     AudioPlayer audio_player;
     s_audio_player = &audio_player;
+    xTaskCreate(mic_asr_button_task, "mic_asr_btn", 8192, nullptr, 5, nullptr);
     DeviceHubClient hub(
         CONFIG_DEVICE_HUB_BASE_URL,
         CONFIG_DEVICE_ID,
@@ -373,6 +421,7 @@ extern "C" void app_main() {
     if (mqtt.start() != ESP_OK) {
         ESP_LOGW(TAG, "MQTT control start failed; HTTP heartbeat remains active");
     }
+    hub.boot_announce();
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
             hub.heartbeat();
