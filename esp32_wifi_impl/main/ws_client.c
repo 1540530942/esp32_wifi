@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "ws_client.h"
 #include "aec_config.h"
 #include "playback.h"
@@ -44,7 +45,29 @@ static void send_start_stream(void)
 
 void ws_client_send_audio(const int16_t *pcm, size_t bytes)
 {
-    if (!s_ready || !s_client || !esp_websocket_client_is_connected(s_client)) return;
+    static uint32_t s_sent = 0, s_dropped = 0;
+    static int64_t s_send_log_us = 0;
+    if (!s_ready || !s_client || !esp_websocket_client_is_connected(s_client)) {
+        s_dropped++;
+        int64_t now = esp_timer_get_time();
+        if (now - s_send_log_us > 5000000) {
+            ESP_LOGW(TAG, "uplink gated: ready=%d connected=%d sent=%lu dropped=%lu",
+                     (int)s_ready, s_client ? (int)esp_websocket_client_is_connected(s_client) : -1,
+                     (unsigned long)s_sent, (unsigned long)s_dropped);
+            s_send_log_us = now;
+        }
+        return;
+    }
+    if (s_sent == 0) ESP_LOGI(TAG, "uplink: first PCM frame (%u bytes)", (unsigned)bytes);
+    s_sent++;
+    {
+        int64_t now = esp_timer_get_time();
+        if (now - s_send_log_us > 5000000) {
+            ESP_LOGI(TAG, "uplink: %lu frames sent (%u B each), %lu dropped",
+                     (unsigned long)s_sent, (unsigned)bytes, (unsigned long)s_dropped);
+            s_send_log_us = now;
+        }
+    }
     // Non-blocking-ish: short timeout, drop on backpressure rather than stall AFE.
     esp_websocket_client_send_bin(s_client, (const char *)pcm, bytes, pdMS_TO_TICKS(50));
 }
@@ -64,8 +87,18 @@ void ws_client_report_tts_state(bool playing)
 // ---------------------------------------------------------------------------
 static void handle_text(const char *data, size_t len)
 {
+    if (!data || len == 0) return;
+    // The cloud streams a per-frame VAD probability (20-140 msg/s). Parsing and
+    // logging every one of those costs a malloc + cJSON parse in the WS task and
+    // starves the little internal RAM left after the AFE — it was enough to drop
+    // the socket. Nothing in this firmware acts on them, so drop them cheaply
+    // before any allocation.
+    if (memmem(data, len, "\"type\": \"vad\"", 13) || memmem(data, len, "\"type\":\"vad\"", 12)) {
+        return;
+    }
+    ESP_LOGI(TAG, "rx text (%u): %.*s", (unsigned)len, (int)(len > 160 ? 160 : len), data);
     cJSON *root = cJSON_ParseWithLength(data, len);
-    if (!root) return;
+    if (!root) { ESP_LOGW(TAG, "rx text: JSON parse failed"); return; }
     const cJSON *type = cJSON_GetObjectItem(root, "type");
     const char *t = cJSON_IsString(type) ? type->valuestring : "";
 
@@ -148,8 +181,8 @@ esp_err_t ws_client_start(void)
     esp_websocket_client_config_t cfg = {
         .uri = AEC_SERVER_URI,
         .reconnect_timeout_ms = 2000,
-        .network_timeout_ms = 8000,
-        .buffer_size = 4096,
+        .network_timeout_ms = 15000,
+        .buffer_size = 8192,    // 8x the 1 KB PCM frame; 4 K saturated, 16 K starved internal RAM
         .ping_interval_sec = 20,
         // Plain ws:// via the gateway IP -- TLS to :443 is MITM-broken on this
         // ISP path (same reason device_hub/OTA use http://110.40.154.41).

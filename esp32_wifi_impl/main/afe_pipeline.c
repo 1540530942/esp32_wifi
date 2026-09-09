@@ -5,6 +5,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
@@ -27,6 +28,11 @@ static afe_audio_cb_t      s_audio_cb;
 static int s_feed_chunksize;      // samples per channel per feed
 static int s_feed_nch;            // total channels fed (== strlen(input_format))
 static int s_ref_index = -1;      // index of the 'R' channel, for software ref
+
+// ERLE measurement accumulators (sum of squares + sample counts).
+static volatile bool   s_metrics_on = false;
+static volatile double s_acc_mic = 0, s_acc_ref = 0, s_acc_clean = 0;
+static volatile uint32_t s_n_in = 0, s_n_out = 0;
 
 #if CONFIG_AEC_SOFTWARE_REF
 static StreamBufferHandle_t s_ref_ring;   // mono int16 reference samples
@@ -58,6 +64,15 @@ static void feed_task(void *arg)
             ESP_LOGI(TAG, "feed: first frame ok bytes=%u mean_abs=%ld", (unsigned)got, (long)(acc / (s_feed_chunksize * s_feed_nch)));
         }
         fed++;
+        if (s_metrics_on) {
+            double am = 0, ar = 0;
+            for (int f = 0; f < s_feed_chunksize; f++) {
+                double m = buf[f * s_feed_nch + 0];
+                double r = s_feed_nch > 1 ? buf[f * s_feed_nch + 1] : 0.0;
+                am += m * m; ar += r * r;
+            }
+            s_acc_mic += am; s_acc_ref += ar; s_n_in += s_feed_chunksize;
+        }
         int64_t now = esp_timer_get_time();
         if (now - last_log_us > 3000000) {
             int32_t a0 = 0, a1 = 0;
@@ -104,6 +119,30 @@ static void fetch_task(void *arg)
         }
 
         // 1) Uplink the clean (echo-cancelled) audio — never gated by playback.
+        {
+            static uint32_t s_fetched = 0;
+            static int64_t s_fetch_log_us = 0;
+            s_fetched++;
+            if (s_metrics_on && res->data && res->data_size > 0) {
+                double ac = 0; int n = res->data_size / 2;
+                for (int i = 0; i < n; i++) { double v = res->data[i]; ac += v * v; }
+                s_acc_clean += ac; s_n_out += n;
+            }
+            if (s_fetched == 1) {
+                ESP_LOGI(TAG, "fetch: first result data=%p size=%d vad=%d",
+                         (void *)res->data, res->data_size, (int)res->vad_state);
+            }
+            int64_t now = esp_timer_get_time();
+            if (now - s_fetch_log_us > 3000000) {
+                int32_t acc = 0;
+                int n = res->data_size / 2;
+                for (int i = 0; i < n; i++) acc += res->data[i] < 0 ? -res->data[i] : res->data[i];
+                ESP_LOGI(TAG, "fetch: %lu results size=%d clean|abs=%ld vad=%d",
+                         (unsigned long)s_fetched, res->data_size,
+                         (long)(n ? acc / n : 0), (int)res->vad_state);
+                s_fetch_log_us = now;
+            }
+        }
         if (s_audio_cb && res->data && res->data_size > 0) {
             s_audio_cb(res->data, (size_t)res->data_size);
         }
@@ -168,6 +207,10 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     cfg->aec_init = false;   // pass-through: raw mic upstream, for A/B echo measurement
 #endif
     afe_config_check(cfg);
+    // Dump what the AFE actually ended up with -- afe_config_check() silently
+    // rewrites conflicting fields, and the AEC mode / filter length it picks
+    // decides how much echo we can cancel.
+    afe_config_print(cfg);
 
     s_afe = esp_afe_handle_from_config(cfg);
     if (!s_afe) { ESP_LOGE(TAG, "esp_afe_handle_from_config failed"); afe_config_free(cfg); return ESP_FAIL; }
@@ -198,4 +241,20 @@ void afe_pipeline_push_ref(const int16_t *pcm, size_t samples)
 #else
     (void)pcm; (void)samples;
 #endif
+}
+
+void afe_metrics_begin(void)
+{
+    s_acc_mic = s_acc_ref = s_acc_clean = 0;
+    s_n_in = s_n_out = 0;
+    s_metrics_on = true;
+}
+
+void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms)
+{
+    s_metrics_on = false;
+    uint32_t ni = s_n_in, no = s_n_out;
+    if (mic_rms)   *mic_rms   = ni ? (float)sqrt(s_acc_mic / ni) : 0.0f;
+    if (ref_rms)   *ref_rms   = ni ? (float)sqrt(s_acc_ref / ni) : 0.0f;
+    if (clean_rms) *clean_rms = no ? (float)sqrt(s_acc_clean / no) : 0.0f;
 }

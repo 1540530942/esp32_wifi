@@ -16,3 +16,11 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio);
 // samples it just played so the AFE has an echo reference. No-op in hardware-
 // reference mode (ES7210 captures the loopback directly).
 void afe_pipeline_push_ref(const int16_t *pcm, size_t samples);
+
+// --- ERLE measurement window -------------------------------------------------
+// afe_metrics_begin() zeroes the accumulators and starts collecting; the feed
+// task sums the raw mic + hardware-reference channels, the fetch task sums the
+// AFE's clean output. afe_metrics_end() returns the RMS of each over the window,
+// so ERLE = 20*log10(mic_rms / clean_rms) during a known echo burst.
+void afe_metrics_begin(void);
+void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms);

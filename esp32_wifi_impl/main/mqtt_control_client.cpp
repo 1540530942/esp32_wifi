@@ -172,7 +172,7 @@ void MqttControlClient::on_command(const std::string& payload) {
     };
     cJSON_free(args_json);
     cJSON_Delete(root);
-    if (xTaskCreate(&MqttControlClient::command_task, "mqtt_cmd", 8192, job, 5,
+    if (xTaskCreate(&MqttControlClient::command_task, "mqtt_cmd", 12288, job, 5,
                     nullptr) != pdPASS) {
         publish_status(job->command.id, "failed", "command task allocation failed");
         delete job;

@@ -17,6 +17,7 @@ extern "C" {
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -32,6 +33,7 @@ extern "C" {
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <ctime>
 #include <sys/time.h>
@@ -196,6 +198,12 @@ static std::string device_state() {
     cJSON_AddStringToObject(state, "ip", ip_text);
     cJSON_AddNumberToObject(state, "uptime_s", esp_timer_get_time() / 1000000);
     cJSON_AddNumberToObject(state, "free_heap", esp_get_free_heap_size());
+    // free_heap counts PSRAM too; task stacks and driver buffers come out of
+    // internal RAM, so report that separately - it is what actually runs out.
+    cJSON_AddNumberToObject(state, "free_internal",
+                            heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(state, "largest_internal",
+                            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(state, "volume", s_volume);
     cJSON_AddNumberToObject(state, "reset_reason", (int)esp_reset_reason());
     cJSON_AddBoolToObject(state, "audio_playing",
@@ -395,6 +403,75 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
                  r.play_rms1 - r.silent_rms1, r.reference_is_real ? "REAL" : "FLOATING");
         return std::string(buf);
     }
+    if (cmd.action == "aec_erle") {
+        // On-device ERLE. Plays a broadband burst through the real ES8311 ->
+        // speaker path while the AFE runs, then compares raw-mic RMS against the
+        // AFE's clean output. Two windows: a settle window (the adaptive filter
+        // is still converging) and a measure window after it. A pure sine is a
+        // poor excitation for an adaptive filter, so the default is white noise.
+        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
+        auto num = [&](const char* k, int dflt, int lo, int hi) {
+            cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
+            return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
+        };
+        const int secs   = num("seconds", 6, 2, 15);
+        const int settle = num("settle", 3, 1, 10);
+        const int vol    = num("volume", 70, 0, 100);
+        cJSON* tone_it = a ? cJSON_GetObjectItem(a, "tone") : nullptr;
+        const bool use_tone = cJSON_IsTrue(tone_it);
+        if (a) cJSON_Delete(a);
+        const int meas = std::max(1, secs - settle);
+
+        float idle_mic = 0, idle_ref = 0, idle_clean = 0;
+        afe_metrics_begin();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        afe_metrics_end(&idle_mic, &idle_ref, &idle_clean);
+
+        board_set_volume(vol);
+        board_pa_enable(true);
+
+        static int16_t blk[256];
+        uint32_t rng = 0x12345678;
+        double phase = 0.0;
+        const double inc = 2.0 * M_PI * 1000.0 / 16000.0;
+        auto fill = [&]() {
+            for (int i = 0; i < 256; ++i) {
+                if (use_tone) { blk[i] = (int16_t)(9000.0 * sin(phase)); phase += inc; }
+                else { rng = rng * 1664525u + 1013904223u; blk[i] = (int16_t)((int32_t)(rng >> 16) % 9000); }
+            }
+        };
+        auto burst = [&](int seconds) {
+            const int blocks = seconds * 16000 / 256;
+            for (int b = 0; b < blocks; ++b) { fill(); board_spk_write(blk, sizeof(blk)); }
+        };
+
+        // window 1: converging
+        float s_mic = 0, s_ref = 0, s_clean = 0;
+        afe_metrics_begin();
+        burst(settle);
+        afe_metrics_end(&s_mic, &s_ref, &s_clean);
+
+        // window 2: converged
+        float m_mic = 0, m_ref = 0, m_clean = 0;
+        afe_metrics_begin();
+        burst(meas);
+        afe_metrics_end(&m_mic, &m_ref, &m_clean);
+        board_pa_enable(false);
+
+        auto erle = [](float in, float out) {
+            return (in > 0.5f && out > 0.5f) ? 20.0f * log10f(in / out) : 0.0f;
+        };
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "done|erle_db=%.1f settle_erle_db=%.1f "
+                 "mic=%.1f ref=%.1f clean=%.1f settle_mic=%.1f settle_clean=%.1f "
+                 "idle_mic=%.1f idle_ref=%.1f idle_clean=%.1f src=%s secs=%d settle=%d vol=%d",
+                 erle(m_mic, m_clean), erle(s_mic, s_clean),
+                 m_mic, m_ref, m_clean, s_mic, s_clean,
+                 idle_mic, idle_ref, idle_clean,
+                 use_tone ? "tone" : "noise", secs, settle, vol);
+        return std::string(buf);
+    }
     if (cmd.action == "mic_asr_test") {
         if (player->is_playing()) return "failed|busy";
         cJSON* args = cJSON_Parse(cmd.args_json.c_str());
@@ -463,7 +540,7 @@ extern "C" void app_main() {
     lcd_print_line(1, s_lcd_ip);
 
     ESP_LOGI(TAG, "device hub client started (no token auth in v1)");
-    MqttControlClient mqtt("wss://www.wangyutang.cn/mqtt", CONFIG_DEVICE_ID,
+    MqttControlClient mqtt("ws://110.40.154.41/mqtt", CONFIG_DEVICE_ID,
                            [&audio_player](const HubCommand& cmd) {
                                return handle_command(cmd, &audio_player);
                            });
