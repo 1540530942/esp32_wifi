@@ -7,6 +7,7 @@ mic/hardware-reference + ES8311 speaker). Firmware: this branch.
 |---|---|
 | `RESULTS.md` | L0 (hardware reference real), L1 (single-talk ERLE), L4 (AEC on/off A/B) — the numbers |
 | `TTS_DOUBLETALK.md` | Double talk with **real TTS speech** as the far end (the product case): before AEC the cloud hears only the robot, after AEC it transcribes the room |
+| `NLP_LEVEL_AB.md` | `aec_nlp_level` AGGR vs NORMAL. Same-session AGGR baseline, and why the "loses the near end at volume 60" boundary in `TTS_DOUBLETALK.md` did not reproduce |
 | `ASR_RESULTS.md` | Does the near end survive? Cloud-ASR transcripts before vs after AEC, and the double-talk sweep across playback volumes |
 | `FINDING_ns_vs_asr.md` | WebRTC NS — not the AEC — measurably degrades uplink ASR; controls that prove it, and the untested options |
 | `AUDIO_INDEX.md` | Every captured WAV, what stage it belongs to, and its levels |
@@ -42,5 +43,5 @@ Naming is consistent everywhere:
 
 - Soak (24 h stability)
 - L3 barge-in latency (duck / cloud-kill timestamps)
-- `aec_nlp_level`: `AGGRESSIVE` vs `MODERATE` comparison
+- `aec_nlp_level`: AGGR baseline measured (`NLP_LEVEL_AB.md`); the NORMAL half still needs a build
 - The NS A/B from `FINDING_ns_vs_asr.md` (`ns_init=false`, or `NSNET`, or `AFE_TYPE_SR`)
