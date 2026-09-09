@@ -6,6 +6,7 @@ mic/hardware-reference + ES8311 speaker). Firmware: this branch.
 | file | what it holds |
 |---|---|
 | `RESULTS.md` | L0 (hardware reference real), L1 (single-talk ERLE), L4 (AEC on/off A/B) — the numbers |
+| `TTS_DOUBLETALK.md` | Double talk with **real TTS speech** as the far end (the product case): before AEC the cloud hears only the robot, after AEC it transcribes the room |
 | `ASR_RESULTS.md` | Does the near end survive? Cloud-ASR transcripts before vs after AEC, and the double-talk sweep across playback volumes |
 | `FINDING_ns_vs_asr.md` | WebRTC NS — not the AEC — measurably degrades uplink ASR; controls that prove it, and the untested options |
 | `AUDIO_INDEX.md` | Every captured WAV, what stage it belongs to, and its levels |
