@@ -30,6 +30,19 @@ MqttControlClient::~MqttControlClient() {
 
 esp_err_t MqttControlClient::start() {
     if (client_) return ESP_OK;
+    // Stand the command worker up first: at boot there is ~31 KB of contiguous
+    // internal RAM, but once the AFE and the WS uplink are running the largest
+    // free block drops below a task stack and per-command xTaskCreate fails.
+    if (!job_queue_) {
+        job_queue_ = xQueueCreate(4, sizeof(MqttCommandJob*));
+        if (!job_queue_) return ESP_ERR_NO_MEM;
+    }
+    if (!worker_) {
+        if (xTaskCreate(&MqttControlClient::command_task, "mqtt_cmd", 8192, this, 5,
+                        &worker_) != pdPASS) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     esp_mqtt_client_config_t config = {};
     config.broker.address.uri = broker_uri_.c_str();
     config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
@@ -172,9 +185,8 @@ void MqttControlClient::on_command(const std::string& payload) {
     };
     cJSON_free(args_json);
     cJSON_Delete(root);
-    if (xTaskCreate(&MqttControlClient::command_task, "mqtt_cmd", 12288, job, 5,
-                    nullptr) != pdPASS) {
-        publish_status(job->command.id, "failed", "command task allocation failed");
+    if (!job_queue_ || xQueueSend(job_queue_, &job, 0) != pdTRUE) {
+        publish_status(job->command.id, "failed", "command queue full");
         delete job;
     }
 }
@@ -188,28 +200,27 @@ bool MqttControlClient::mark_command_seen(const std::string& command_id) {
 }
 
 void MqttControlClient::command_task(void* arg) {
-    auto* job = static_cast<MqttCommandJob*>(arg);
-    if (!job || !job->owner) {
-        vTaskDelete(nullptr);
-        return;
+    auto* self = static_cast<MqttControlClient*>(arg);
+    for (;;) {
+        MqttCommandJob* job = nullptr;
+        if (xQueueReceive(self->job_queue_, &job, portMAX_DELAY) != pdTRUE || !job) continue;
+        MqttControlClient* owner = job->owner ? job->owner : self;
+        owner->publish_status(job->command.id, "accepted", {}, job->command.action);
+        const std::string result = owner->command_handler_
+            ? owner->command_handler_(job->command) : "unsupported";
+        const size_t separator = result.find('|');
+        const std::string status = separator == std::string::npos ? result : result.substr(0, separator);
+        const std::string message = separator == std::string::npos ? std::string() : result.substr(separator + 1);
+        std::string stream_id;
+        cJSON* args = cJSON_Parse(job->command.args_json.c_str());
+        if (args) {
+            cJSON* item = cJSON_GetObjectItem(args, "stream_id");
+            if (cJSON_IsString(item)) stream_id = item->valuestring;
+            cJSON_Delete(args);
+        }
+        owner->publish_status(job->command.id, status, message, job->command.action, stream_id);
+        delete job;
     }
-    MqttControlClient* owner = job->owner;
-    owner->publish_status(job->command.id, "accepted", {}, job->command.action);
-    const std::string result = owner->command_handler_
-        ? owner->command_handler_(job->command) : "unsupported";
-    const size_t separator = result.find('|');
-    const std::string status = separator == std::string::npos ? result : result.substr(0, separator);
-    const std::string message = separator == std::string::npos ? std::string() : result.substr(separator + 1);
-    std::string stream_id;
-    cJSON* args = cJSON_Parse(job->command.args_json.c_str());
-    if (args) {
-        cJSON* item = cJSON_GetObjectItem(args, "stream_id");
-        if (cJSON_IsString(item)) stream_id = item->valuestring;
-        cJSON_Delete(args);
-    }
-    owner->publish_status(job->command.id, status, message, job->command.action, stream_id);
-    delete job;
-    vTaskDelete(nullptr);
 }
 
 void MqttControlClient::publish_status(const std::string& command_id,

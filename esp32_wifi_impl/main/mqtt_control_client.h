@@ -2,6 +2,9 @@
 
 #include "device_hub_client.h"
 #include "mqtt_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include <functional>
 #include <atomic>
 #include <mutex>
@@ -31,6 +34,9 @@ public:
 private:
     static void event_handler(void* handler_args, esp_event_base_t base,
                               int32_t event_id, void* event_data);
+    // One long-lived worker drains this queue. Creating a task per command
+    // failed intermittently: once the AFE is up there is ~48 KB of internal
+    // RAM left with a ~17 KB largest block, and task stacks must be internal.
     static void command_task(void* arg);
     void on_event(esp_mqtt_event_handle_t event);
     void on_command(const std::string& payload);
@@ -49,6 +55,8 @@ private:
     std::string log_topic_;
     CommandHandler command_handler_;
     esp_mqtt_client_handle_t client_ = nullptr;
+    QueueHandle_t job_queue_ = nullptr;
+    TaskHandle_t worker_ = nullptr;
     std::string incoming_payload_;
     std::atomic<bool> connected_{false};
     std::atomic<uint32_t> connect_attempts_{0};
