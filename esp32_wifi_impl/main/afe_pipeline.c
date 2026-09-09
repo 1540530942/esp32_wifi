@@ -223,6 +223,9 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
 #else
     cfg->aec_init = false;   // pass-through: raw mic upstream, for A/B echo measurement
 #endif
+    // Set explicitly rather than relying on the AFE_TYPE_VC default, so the
+    // level a given build was measured at is visible in the source.
+    cfg->aec_nlp_level = AEC_NLP_LEVEL;
     afe_config_check(cfg);
     // Dump what the AFE actually ended up with -- afe_config_check() silently
     // rewrites conflicting fields, and the AEC mode / filter length it picks
