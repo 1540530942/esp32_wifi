@@ -151,9 +151,8 @@ esp_err_t ws_client_start(void)
         .network_timeout_ms = 8000,
         .buffer_size = 4096,
         .ping_interval_sec = 20,
-        // Public gateway uses a real cert; we skip verification for portability.
-        // Provide .cert_pem and remove this for pinned-cert production.
-        .skip_cert_common_name_check = true,
+        // Plain ws:// via the gateway IP -- TLS to :443 is MITM-broken on this
+        // ISP path (same reason device_hub/OTA use http://110.40.154.41).
         .disable_auto_reconnect = false,
     };
     s_client = esp_websocket_client_init(&cfg);

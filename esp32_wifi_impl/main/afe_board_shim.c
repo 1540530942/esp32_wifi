@@ -16,6 +16,10 @@ esp_err_t board_init(void)
     // AEC-path speaker volume and make sure input is enabled.
     AudioCodec_SetOutputVolume(s_codec, CONFIG_AEC_SPEAKER_VOLUME);
     AudioCodec_EnableInput(s_codec, true);
+    // Full-duplex on one I2S controller: RX is the clock slave, so it only
+    // gets BCLK/WS while the TX path is enabled. Keep output open (playback.c
+    // gates the actual amp via board_pa_enable) or the AFE feed starves.
+    AudioCodec_EnableOutput(s_codec, true);
     ESP_LOGI(TAG, "board ready (BoxAudioCodec: %dch in, ES8311 out, %d Hz)",
              AudioCodec_GetInputChannels(s_codec), AudioCodec_GetInputSampleRate(s_codec));
     return ESP_OK;

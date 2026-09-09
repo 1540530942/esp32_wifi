@@ -135,3 +135,78 @@ AFE init); all later iteration via OTA.**
   added aec_probe/mic_asr_test remote commands (`6480380`); usbipd-attached the
   ESP32 to WSL, confirmed serial; scaffolded AFE integration; ported afe_pipeline.c
   to esp-sr 2.5.3 API; kicked off first full build.
+
+## 2026-09-09 — first wired flash
+
+- `idf.py build` clean (BUILD_EXIT=0). Binary 0x254240 = 2.33 MB, 22% free in the 3 MB
+  OTA slot. **R2 (flash budget) resolved — no partition changes.**
+- Checkpoint committed `fb5e6e2`, pushed. (Snag: `git add -A` first pulled in the whole
+  `managed_components/` tree, 2117 files pushed as `f9cc968`; fixed with
+  `.gitignore += managed_components/`, re-commit, `--force-with-lease`.)
+- `idf.py -p /dev/ttyACM0 flash` → FLASH_EXIT=0, all hashes verified, app written to
+  ota_0 @ 0x20000.
+- **USB-Serial-JTAG has no RTS pin → esptool's `--after hard_reset` is a no-op.** The
+  chip stayed in the download stub after flash (silent serial, device-hub showed the
+  pre-flash last-known-good state). Reset it with a pyserial DTR/RTS toggle
+  (DTR=False, pulse RTS) → clean boot.
+- Boot log: **AEC firmware boots fine** — `Loaded app from partition at offset 0x20000`,
+  `App version: ota-esp32-wangyutang-v20-mic-2-`, PSRAM 8MB OK, cpu 240 MHz,
+  `Calling app_main()`, `reset_reason=11` (ESP_RST_USB — our reset, benign).
+- **BLOCKER: WiFi credentials not in tracked config.**
+  `W (1335) wifi: Password length is zero, ... impossible to connect to an AP with authmode OPEN`
+  `sdkconfig.defaults` and `sdkconfig.old` both have `CONFIG_DEVICE_WIFI_SSID/PASSWORD=""`.
+  The creds that let v20-boot join `ChinaNet-dsge` were set via menuconfig into the
+  gitignored `sdkconfig` and lost when it was regenerated. `app_main` blocks forever at
+  `xEventGroupWaitBits(WIFI_CONNECTED_BIT)` → never reaches board_init / afe_pipeline_init.
+  Need: the `ChinaNet-dsge` password. Fix = set the two CONFIG lines in the generated
+  `sdkconfig` (gitignored), rebuild, reflash. Do NOT put real creds in `sdkconfig.defaults`.
+- Serial access notes: `/dev/ttyACM0` present via `usbipd attach --wsl --busid 2-5`.
+  `idf.py monitor` fails headless (needs a TTY). Use a pyserial reader + DTR/RTS toggle
+  to reset+capture. esptool talks to the ROM/stub fine (read MAC 58:e6:c5:6b:9b:84).
+
+## 2026-09-09 (cont.) — AFE pipeline confirmed live on hardware
+
+WiFi creds set in gitignored `sdkconfig` (`ChinaNet-dsge`). Rebuild + wired reflash.
+Boot log (device `esp32-s3-walle`, 192.168.1.55):
+
+```
+wifi: connected with ChinaNet-dsge, got IP=192.168.1.55
+i2s_common: rx channel on I2S0 switched master->slave for full-duplex mode
+afe_board: board ready (BoxAudioCodec: 2ch in, ES8311 out, 16000 Hz)      <- shim OK
+AFE: AFE Version: (1MIC_V251128)
+AFE: Input PCM Config: total 2 channels(1 microphone, 1 playback), 16000   <- "MR" parsed OK
+AFE: AFE Pipeline: [input] -> |AEC(VOIP_HIGH_PERF, NLP_ON)| -> |NS(WebRTC)| -> |VAD(WebRTC)| -> [output]
+wangyutang_app: AEC full-duplex pipeline started                           <- init chain all ESP_OK
+device_hub: registered OK
+```
+
+**esp-sr 2.5.3 AFE (AEC VOIP-high-perf + NLP + WebRTC NS + WebRTC VAD) is initialized
+and running on the real device.** The port (afe_config_init / esp_afe_handle_from_config
+/ AFE_TYPE_VC / "MR" 2ch / BoxAudioCodec shim / 16 kHz) all works. `board_init` no-op +
+`afe_pipeline_init` succeed.
+
+### Blocker: TLS to :443 is broken on this ISP path (not a bug in our code)
+- `ws_client.c` first failed with "No server verification option" (ported config had
+  `skip_cert_common_name_check` + no CA). Added `crt_bundle_attach`.
+- Then: `esp-x509-crt-bundle: Certificate matched but signature verification failed`
+  (`PK verify failed 0x4290`), `mbedtls_ssl_handshake returned -0x3000`.
+- **The whole firmware already works around this**: `device_hub_client` and `ota` fall
+  back to plain `http://110.40.154.41` ("fallback when the ISP path to port 443 is
+  temporarily unavailable" — tag `v10-network-fallback`). Looks like ChinaNet MITM /
+  TLS interception on `www.wangyutang.cn:443`.
+- Secondary damage: the 2s WS reconnect storm exhausted the TLS heap
+  (`mbedtls_ssl_setup returned -0x7F00` = ALLOC_FAILED) and started breaking the
+  device_hub HTTPS heartbeat too.
+
+### Fix: `/ws/audio` over plain `ws://`
+- `CONFIG_AEC_SERVER_URI` default → `ws://110.40.154.41/ws/audio` (Kconfig + sdkconfig).
+  Caddy on :80 serves `/devices/api` fine (proven by the heartbeat fallback), should
+  serve `/ws/audio` (WS upgrade over plain HTTP is fine).
+- Removed `crt_bundle_attach` / `esp_crt_bundle.h` from `ws_client.c` — no TLS now.
+- Rebuild + reflash (bf3) → expecting `start_stream` → `stream_ready`.
+
+### Serial capture recipe (headless, no idf.py monitor)
+`idf.py monitor` needs a TTY → unusable over SSH. Use pyserial:
+`Serial('/dev/ttyACM0',115200)`, `setDTR(False); setRTS(True); sleep .1; setRTS(False)`
+to reset-into-app, then read. USB-JTAG re-enumerates on reset so re-open with retries;
+`usbipd attach --wsl --busid 2-5` if `/dev/ttyACM0` vanishes.

@@ -10,6 +10,7 @@
 #include "freertos/stream_buffer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 // esp-sr 1.9 AFE API: use AFE_CONFIG_DEFAULT() + field overrides, then
@@ -42,11 +43,33 @@ static void feed_task(void *arg)
     if (!buf) buf = malloc(frame_bytes);
     assert(buf);
 
+    uint32_t fed = 0;
+    int64_t last_log_us = 0;
     for (;;) {
         size_t got = 0;
         if (board_mic_read(buf, frame_bytes, &got) != ESP_OK || got == 0) {
+            if ((fed & 0x3f) == 0) ESP_LOGW(TAG, "feed: mic_read returned nothing (got=%u)", (unsigned)got);
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
+        }
+        if (fed == 0) {
+            int32_t acc = 0;
+            for (int i = 0; i < s_feed_chunksize * s_feed_nch; i++) acc += buf[i] < 0 ? -buf[i] : buf[i];
+            ESP_LOGI(TAG, "feed: first frame ok bytes=%u mean_abs=%ld", (unsigned)got, (long)(acc / (s_feed_chunksize * s_feed_nch)));
+        }
+        fed++;
+        int64_t now = esp_timer_get_time();
+        if (now - last_log_us > 3000000) {
+            int32_t a0 = 0, a1 = 0;
+            for (int f = 0; f < s_feed_chunksize; f++) {
+                int16_t m = buf[f * s_feed_nch + 0];
+                int16_t r = s_feed_nch > 1 ? buf[f * s_feed_nch + 1] : 0;
+                a0 += m < 0 ? -m : m;
+                a1 += r < 0 ? -r : r;
+            }
+            ESP_LOGI(TAG, "feed: %lu frames, last mic|abs=%ld ref|abs=%ld", (unsigned long)fed,
+                     (long)(a0 / s_feed_chunksize), (long)(a1 / s_feed_chunksize));
+            last_log_us = now;
         }
 #if CONFIG_AEC_SOFTWARE_REF
         // Overwrite the reference channel with what we just played, so the AFE

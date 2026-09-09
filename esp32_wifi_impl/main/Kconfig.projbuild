@@ -30,7 +30,7 @@ menu "AEC Full-Duplex Voice"
 
 config AEC_SERVER_URI
     string "Cloud WebSocket URI (audio_interact /ws/audio)"
-    default "wss://www.wangyutang.cn/ws/audio"
+    default "ws://110.40.154.41/ws/audio"
 
 config AEC_AUDIO_TOKEN
     string "X-Audio-Token header (empty = none)"
