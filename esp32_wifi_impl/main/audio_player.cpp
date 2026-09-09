@@ -553,8 +553,12 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
 
 namespace {
 
-constexpr const char* kAsrUrl = "https://www.wangyutang.cn/common/api/asr/transcribe";
-constexpr const char* kTtsUrl = "https://www.wangyutang.cn/audio_interact/api/tts";
+// Plain HTTP via the gateway IP: TLS to :443 is MITM-broken on this ISP path
+// (esp-x509-crt-bundle reports a signature failure), which is the same reason
+// device_hub, OTA and the /ws/audio uplink all avoid it. Verified: the gateway
+// serves both of these on port 80.
+constexpr const char* kAsrUrl = "http://110.40.154.41/common/api/asr/transcribe";
+constexpr const char* kTtsUrl = "http://110.40.154.41/audio_interact/api/tts";
 constexpr const char* kBoundary = "----ESP32MicAsrBoundary7MA4YWxk";
 
 void write_wav_header(uint8_t* hdr, uint32_t data_bytes, uint32_t sample_rate) {
@@ -600,7 +604,15 @@ esp_err_t read_full_response(esp_http_client_handle_t client, uint8_t** out_buf,
         }
         int r = esp_http_client_read(client, reinterpret_cast<char*>(buf + total), cap - total);
         if (r < 0) { heap_caps_free(buf); return ESP_FAIL; }
-        if (r == 0) break;
+        if (r == 0) {
+            // A zero read is not necessarily EOF: on a long transfer the socket
+            // can simply have nothing buffered yet. Trust the declared length,
+            // or the completion flag, instead -- otherwise large bodies (a
+            // 600 KB TTS WAV, say) get silently truncated mid-stream.
+            if (content_length > 0 && total < static_cast<size_t>(content_length)) continue;
+            if (!esp_http_client_is_complete_data_received(client)) continue;
+            break;
+        }
         total += static_cast<size_t>(r);
     }
     *out_buf = buf; *out_len = total;
@@ -667,7 +679,10 @@ esp_err_t tts_synthesize(const std::string& text, uint8_t** out_wav, size_t* out
     esp_http_client_config_t config = {};
     config.url = kTtsUrl;
     config.method = HTTP_METHOD_POST;
-    config.timeout_ms = 20000;
+    // Synthesis is slow and scales with the text: ~13 s for 30 characters,
+    // ~25 s for 60. The old 20 s budget silently failed anything but a short
+    // phrase, so allow a full sentence to come back.
+    config.timeout_ms = 90000;
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.buffer_size = 2048;
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -692,6 +707,10 @@ esp_err_t tts_synthesize(const std::string& text, uint8_t** out_wav, size_t* out
 }
 
 }  // namespace
+
+esp_err_t AudioPlayer::fetch_tts(const std::string& text, uint8_t** wav, size_t* len) {
+    return tts_synthesize(text, wav, len);
+}
 
 esp_err_t AudioPlayer::run_mic_asr_test(int seconds, uint8_t volume_percent) {
     if (!codec_) return ESP_ERR_INVALID_STATE;

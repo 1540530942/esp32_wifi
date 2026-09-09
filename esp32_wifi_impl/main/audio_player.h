@@ -43,6 +43,12 @@ public:
     // by eye in the serial log. Does not touch run_mic_asr_test's path.
     esp_err_t run_aec_reference_probe();
 
+    // Synthesize `text` through the cloud TTS and hand back the raw WAV
+    // (heap_caps buffer, caller frees with heap_caps_free). Same call
+    // run_mic_asr_test uses to speak its reply, so it is a known-good path --
+    // unlike play_wav_url, which does not produce audio on this device.
+    esp_err_t fetch_tts(const std::string& text, uint8_t** wav, size_t* len);
+
     // Populated by run_aec_reference_probe() on ESP_OK, so a remote caller
     // (device-hub command) can read the measurement instead of the UART log.
     struct AecProbeResult {

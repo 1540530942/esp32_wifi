@@ -472,11 +472,19 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
             return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
         };
-        const int secs   = num("seconds", 5, 1, 10);
+        const int secs   = num("seconds", 15, 1, 30);
         const int settle = num("settle", 3, 0, 10);
         const int vol    = num("volume", 100, 0, 100);
         cJSON* tone_it = a ? cJSON_GetObjectItem(a, "tone") : nullptr;
         const bool use_tone = cJSON_IsTrue(tone_it);
+        // Optional: play a real WAV (TTS speech) through the speaker instead of a
+        // synthetic burst. Speech is far easier to judge by ear than noise.
+        cJSON* url_it = a ? cJSON_GetObjectItem(a, "url") : nullptr;
+        std::string play_url = cJSON_IsString(url_it) ? url_it->valuestring : "";
+        // `text` plays real TTS speech as the far end -- the actual product case
+        // (the robot talking while someone speaks to it).
+        cJSON* text_it = a ? cJSON_GetObjectItem(a, "text") : nullptr;
+        std::string tts_text = cJSON_IsString(text_it) ? text_it->valuestring : "";
         const char* tag = a ? [&]{ cJSON* t = cJSON_GetObjectItem(a, "tag");
                                    return cJSON_IsString(t) ? t->valuestring : "run"; }() : "run";
         std::string tagname = tag;
@@ -505,16 +513,75 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             }
         };
 
-        board_set_volume(vol);
-        board_pa_enable(true);
-        if (settle > 0) burst(settle);            // let the adaptive filter converge
-        afe_capture_begin(bmic, bref, bclean, cap);
-        burst(secs);
         size_t nm = 0, nr = 0, nc = 0;
-        afe_capture_end(&nm, &nr, &nc);
-        board_pa_enable(false);
+        if (!tts_text.empty()) {
+            uint8_t* twav = nullptr; size_t tlen = 0;
+            if (player->fetch_tts(tts_text, &twav, &tlen) != ESP_OK || tlen < 44) {
+                heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+                return "failed|stage=tts_fetch";
+            }
+            // TTS comes back at the cloud's rate (24 kHz); the codec runs at 16 kHz,
+            // so resample on the fly while writing, exactly like playback.c does.
+            const int16_t* pcm = reinterpret_cast<const int16_t*>(twav + 44);
+            const size_t nsamp = (tlen - 44) / sizeof(int16_t);
+            const double step = 24000.0 / 16000.0;
+            board_set_volume(vol);
+            board_pa_enable(true);
+            static int16_t out[256];
+            size_t oi = 0; double pos = 0.0; bool capturing = false;
+            const int64_t t0 = esp_timer_get_time();
+            // Replay the clip until the window is full. Synthesis length is not
+            // under our control (and the body can come back short), so looping
+            // is what makes the capture a fixed, requested duration -- and a
+            // robot that keeps talking is the case we actually care about.
+            while (true) {
+                if (pos >= (double)nsamp - 1.0) pos = 0.0;
+                if (!capturing && (esp_timer_get_time() - t0) > (int64_t)settle * 1000000) {
+                    afe_capture_begin(bmic, bref, bclean, cap);
+                    capturing = true;
+                }
+                size_t i0 = (size_t)pos;
+                double fr = pos - i0;
+                out[oi++] = (int16_t)(pcm[i0] + (pcm[i0 + 1] - pcm[i0]) * fr);
+                if (oi == 256) { board_spk_write(out, sizeof(out)); oi = 0; }
+                pos += step;
+                if (capturing && (esp_timer_get_time() - t0) > (int64_t)(settle + secs) * 1000000) break;
+            }
+            if (oi) board_spk_write(out, oi * sizeof(int16_t));
+            if (!capturing) afe_capture_begin(bmic, bref, bclean, cap);
+            // let the tail of the burst reach the mic before closing the window
+            vTaskDelay(pdMS_TO_TICKS(300));
+            afe_capture_end(&nm, &nr, &nc);
+            board_pa_enable(false);
+            heap_caps_free(twav);
+        } else if (!play_url.empty()) {
+            // Real audio through the normal playback path; capture runs alongside.
+            // The amp must be ungated here too -- a previous burst leaves it off.
+            board_set_volume(vol);
+            board_pa_enable(true);
+            s_volume = vol;
+            if (player->play_wav_url(play_url, (uint8_t)vol) != ESP_OK) {
+                heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+                return "failed|stage=play_url";
+            }
+            if (settle > 0) vTaskDelay(pdMS_TO_TICKS(settle * 1000));
+            afe_capture_begin(bmic, bref, bclean, cap);
+            vTaskDelay(pdMS_TO_TICKS(secs * 1000));
+            afe_capture_end(&nm, &nr, &nc);
+            player->stop();
+            for (int i = 0; i < 100 && player->is_playing(); ++i) vTaskDelay(pdMS_TO_TICKS(20));
+            board_pa_enable(false);
+        } else {
+            board_set_volume(vol);
+            board_pa_enable(true);
+            if (settle > 0) burst(settle);        // let the adaptive filter converge
+            afe_capture_begin(bmic, bref, bclean, cap);
+            burst(secs);
+            afe_capture_end(&nm, &nr, &nc);
+            board_pa_enable(false);
+        }
 
-        const std::string base = tagname + "_" + (use_tone ? "tone" : "noise") + "_v" + std::to_string(vol);
+        const std::string base = tagname + "_" + (!tts_text.empty() ? "tts" : (!play_url.empty() ? "speech" : (use_tone ? "tone" : "noise"))) + "_v" + std::to_string(vol);
         const bool o1 = aec_upload_wav((base + "_1_mic_raw.wav").c_str(),   bmic,   nm);
         const bool o2 = aec_upload_wav((base + "_2_reference.wav").c_str(), bref,   nr);
         const bool o3 = aec_upload_wav((base + "_3_clean_aec.wav").c_str(), bclean, nc);
