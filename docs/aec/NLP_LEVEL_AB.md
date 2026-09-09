@@ -1,6 +1,7 @@
 # `aec_nlp_level` AGGR vs NORMAL 对照
 
-**状态：基线已测，NORMAL 侧待编译（WSL 不可达，见文末）。**
+**结论：两档抑制量逐档相差不到 1 dB，NORMAL 没有可测收益，默认保持 AGGR。**
+真正压住近端的是下游的 WebRTC NS，不是 AEC 的 NLP —— 详见文末。
 
 ## 背景
 
@@ -60,22 +61,58 @@ AEC_NLP_LEVEL_VERYAGGR = 2,  // Very aggressive level, strongest echo suppressio
 这也说明一件方法上的事：**跨时段的档位对比必须同期重测基线**，否则会把房间条件
 的漂移误读成参数效果。本轮先测基线再改参数，就是为了这个。
 
-## 待做
+## NORMAL 侧（同日稍后，重新编译烧录）
 
-NORMAL 侧的对照没跑成 —— 改完代码准备编译时 WSL 掉线（`ssh wsl` 连续 5 次
-`Connection timed out`，是 `docs/logs/2026-09-04-wsl-connection-drop.md` 记过的老问题）。
-固件编译烧录只能在 WSL 上做，所以 NORMAL 这一半要等它回来。
+先确认参数真的生效了 —— `afe_config_check()` 会静默改写冲突字段，所以不能只看源码。
+读设备启动串口，`afe_config_print()` 的输出：
 
-代码改动（`AEC_NLP_LEVEL` 开关 + 显式赋值）已经落在 WSL 的工作区里，还没提交。
-WSL 恢复后：把开关翻到 `AEC_NLP_LEVEL_NORMAL`、编译烧录、用**完全相同的**
-三档（25/12s、40/12s、60/15s）和同一段 TTS 文本重跑，逐档对比上表。
+```
+aec_init: true
+aec mode: VOIP_HIGH_PERF
+aec_nlp_level: NORMAL          <- 改上了
+aec_filter_length: 4
+ns_init: true
+AFE Pipeline: [input] -> |AEC(VOIP_HIGH_PERF, NLP_ON)| -> |NS(WebRTC)| -> |VAD(WebRTC)| -> [output]
+```
 
-看点不是"NORMAL 的抑制量是否更低"（一定更低），而是：
+同样三档、同一段 TTS 文本：
 
-1. 在回声强的那一档（vol=60），NORMAL 的 `clean_aec` 里近端是否更完整 —— 转写
-   的字数、有没有丢结尾。
-2. 残留回声会不会强到让 ASR 把机器人自己的话也认出来 —— 那就是 NORMAL 过头了，
-   上行会把设备自己说的话当成用户输入，这是全双工里最不能接受的失败模式。
+| vol | 时长 | `mic_raw` RMS | `clean_aec` RMS | 抑制 | AEC 后 ASR |
+|---|---|---|---|---|---|
+| 25 | 12 s | 130.0 | 22.2 | 15.3 dB | 曾经的伤心，如今想起始终刺痛。曾经的你，曾经的你。 |
+| 40 | 12 s | 255.6 | 15.4 | 24.4 dB | **(空)** |
+| 60 | 15 s | 655.4 | 12.7 | 34.3 dB | **(空)** |
 
-第 2 点是真正的判据：**只要 `clean_aec` 的 ASR 里出现机器人自己的句子，这一档就
-不可用**，无论近端保真度提升了多少。
+## 结论：NORMAL 没有可测的收益，保持 AGGR
+
+**抑制量逐档几乎完全一致，三档全部在 1 dB 以内：**
+
+| vol | AGGR 抑制 | NORMAL 抑制 | 差 |
+|---|---|---|---|
+| 25 | 16.3 dB | 15.3 dB | 1.0 dB |
+| 40 | 23.7 dB | 24.4 dB | 0.7 dB |
+| 60 | 34.4 dB | 34.3 dB | 0.1 dB |
+
+这不是"没改上"—— 串口已经确认 `aec_nlp_level: NORMAL` 生效了。就是说**在这条信号
+路径上，NLP 档位对回声抑制量没有可测影响**。原来的假设（AGGR 压得太狠、退一档能保住
+近端）不成立。
+
+原因大概率是：真正决定 `clean_aec` 电平的不是 AEC 的 NLP，而是它下游的 **WebRTC NS**。
+`FINDING_ns_vs_asr.md` 已经单独证过 NS 会把持续稳定的声音越学越当背景压掉；NS 在这里
+是共同的下游，NLP 档位怎么调都要过它这一关，所以差异被抹平了。这也把优先级指向了
+队列里的下一项 —— **NS 的 A/B 才是有希望的那条路**。
+
+近端 ASR 恢复率 AGGR 3/3、NORMAL 1/3，但两组的输入条件有漂移（v60 那档 NORMAL 的
+`mic_raw` 是 655.4，AGGR 是 378.5，回声强了 4.8 dB），所以这个差距**不能**归因于参数，
+只能说 NORMAL 没有表现出任何优势。
+
+**安全性上两档都合格**：六次捕获里 `clean_aec` 的 ASR **从没出现过机器人自己的句子**，
+没有触发"把设备自己说的话当成用户输入"这个失败模式。
+
+据此把 `AEC_NLP_LEVEL` 的默认值保持在 `AEC_NLP_LEVEL_AGGR`，开关留着备用。
+`VERYAGGR` 没测 —— 既然 NORMAL→AGGR 之间毫无差别，再往更激进的一档走没有理由。
+
+## 音频
+
+`~/workspace/data/aec/`：`AGGR_v25_*` / `AGGR_v40_*` / `AGGR_v60_15s_*`、
+`NORM_v25_*` / `NORM_v40_*` / `NORM_v60_15s_*`，每组三通道。
