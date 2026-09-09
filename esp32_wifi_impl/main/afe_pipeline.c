@@ -34,6 +34,11 @@ static volatile bool   s_metrics_on = false;
 static volatile double s_acc_mic = 0, s_acc_ref = 0, s_acc_clean = 0;
 static volatile uint32_t s_n_in = 0, s_n_out = 0;
 
+// Raw / clean capture (see afe_capture_begin).
+static int16_t *s_cap_mic, *s_cap_ref, *s_cap_clean;
+static volatile size_t s_cap_cap, s_cap_i_in, s_cap_i_out;
+static volatile bool s_cap_on = false;
+
 #if CONFIG_AEC_SOFTWARE_REF
 static StreamBufferHandle_t s_ref_ring;   // mono int16 reference samples
 #endif
@@ -64,6 +69,13 @@ static void feed_task(void *arg)
             ESP_LOGI(TAG, "feed: first frame ok bytes=%u mean_abs=%ld", (unsigned)got, (long)(acc / (s_feed_chunksize * s_feed_nch)));
         }
         fed++;
+        if (s_cap_on && s_cap_i_in < s_cap_cap) {
+            for (int f = 0; f < s_feed_chunksize && s_cap_i_in < s_cap_cap; f++) {
+                s_cap_mic[s_cap_i_in] = buf[f * s_feed_nch + 0];
+                s_cap_ref[s_cap_i_in] = s_feed_nch > 1 ? buf[f * s_feed_nch + 1] : 0;
+                s_cap_i_in++;
+            }
+        }
         if (s_metrics_on) {
             double am = 0, ar = 0;
             for (int f = 0; f < s_feed_chunksize; f++) {
@@ -123,6 +135,11 @@ static void fetch_task(void *arg)
             static uint32_t s_fetched = 0;
             static int64_t s_fetch_log_us = 0;
             s_fetched++;
+            if (s_cap_on && res->data && res->data_size > 0 && s_cap_i_out < s_cap_cap) {
+                int n = res->data_size / 2;
+                for (int i = 0; i < n && s_cap_i_out < s_cap_cap; i++)
+                    s_cap_clean[s_cap_i_out++] = res->data[i];
+            }
             if (s_metrics_on && res->data && res->data_size > 0) {
                 double ac = 0; int n = res->data_size / 2;
                 for (int i = 0; i < n; i++) { double v = res->data[i]; ac += v * v; }
@@ -257,4 +274,20 @@ void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms)
     if (mic_rms)   *mic_rms   = ni ? (float)sqrt(s_acc_mic / ni) : 0.0f;
     if (ref_rms)   *ref_rms   = ni ? (float)sqrt(s_acc_ref / ni) : 0.0f;
     if (clean_rms) *clean_rms = no ? (float)sqrt(s_acc_clean / no) : 0.0f;
+}
+
+void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples)
+{
+    s_cap_mic = mic; s_cap_ref = ref; s_cap_clean = clean;
+    s_cap_cap = cap_samples;
+    s_cap_i_in = s_cap_i_out = 0;
+    s_cap_on = true;
+}
+
+void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n)
+{
+    s_cap_on = false;
+    if (mic_n)   *mic_n   = s_cap_i_in;
+    if (ref_n)   *ref_n   = s_cap_i_in;
+    if (clean_n) *clean_n = s_cap_i_out;
 }

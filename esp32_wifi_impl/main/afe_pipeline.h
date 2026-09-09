@@ -24,3 +24,10 @@ void afe_pipeline_push_ref(const int16_t *pcm, size_t samples);
 // so ERLE = 20*log10(mic_rms / clean_rms) during a known echo burst.
 void afe_metrics_begin(void);
 void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms);
+
+// --- raw/clean capture ------------------------------------------------------
+// Records the two things you need to hear an AEC working: the raw microphone
+// channel (echo included, pre-AFE) and the AFE's clean output (post-AEC), plus
+// the hardware reference channel. Buffers are caller-owned int16 mono @16 kHz.
+void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples);
+void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);

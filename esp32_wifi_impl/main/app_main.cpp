@@ -268,6 +268,67 @@ static void aec_on_tts_state(bool playing) {
     ws_client_report_tts_state(playing);
 }
 
+// --- capture upload ---------------------------------------------------------
+// Wrap mono 16-bit PCM as a WAV and multipart-POST it to device-hub, which
+// stores it under its audio dir and hands back a URL. Plain HTTP on the gateway
+// IP: :443 is MITM-broken on this ISP path (same reason everything else here
+// avoids TLS).
+static void aec_wav_header(uint8_t* h, uint32_t data_bytes, uint32_t rate) {
+    const uint32_t br = rate * 2, riff = 36 + data_bytes;
+    std::memcpy(h, "RIFF", 4);
+    h[4]=riff&0xff; h[5]=(riff>>8)&0xff; h[6]=(riff>>16)&0xff; h[7]=(riff>>24)&0xff;
+    std::memcpy(h+8, "WAVEfmt ", 8);
+    h[16]=16; h[17]=h[18]=h[19]=0; h[20]=1; h[21]=0; h[22]=1; h[23]=0;
+    h[24]=rate&0xff; h[25]=(rate>>8)&0xff; h[26]=(rate>>16)&0xff; h[27]=(rate>>24)&0xff;
+    h[28]=br&0xff; h[29]=(br>>8)&0xff; h[30]=(br>>16)&0xff; h[31]=(br>>24)&0xff;
+    h[32]=2; h[33]=0; h[34]=16; h[35]=0;
+    std::memcpy(h+36, "data", 4);
+    h[40]=data_bytes&0xff; h[41]=(data_bytes>>8)&0xff; h[42]=(data_bytes>>16)&0xff; h[43]=(data_bytes>>24)&0xff;
+}
+
+static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples) {
+    if (!pcm || samples == 0) return false;
+    const size_t data_bytes = samples * sizeof(int16_t);
+    uint8_t hdr[44];
+    aec_wav_header(hdr, (uint32_t)data_bytes, 16000);
+
+    const char* boundary = "----ESP32AecCapture7MA4YWxk";
+    std::string pre = std::string("--") + boundary +
+        "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name +
+        "\"\r\nContent-Type: audio/wav\r\n\r\n";
+    std::string post = std::string("\r\n--") + boundary + "--\r\n";
+    const size_t total = pre.size() + sizeof(hdr) + data_bytes + post.size();
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = "http://110.40.154.41/devices/api/device/" CONFIG_DEVICE_ID "/upload_audio";
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 30000;
+    cfg.buffer_size = 1024;
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return false;
+    std::string ct = std::string("multipart/form-data; boundary=") + boundary;
+    esp_http_client_set_header(c, "Content-Type", ct.c_str());
+    bool ok = false;
+    if (esp_http_client_open(c, (int)total) == ESP_OK) {
+        ok = esp_http_client_write(c, pre.data(), pre.size()) >= 0 &&
+             esp_http_client_write(c, (const char*)hdr, sizeof(hdr)) >= 0;
+        // stream the PCM in chunks so we never need a second full-size buffer
+        const uint8_t* p = (const uint8_t*)pcm;
+        size_t left = data_bytes;
+        while (ok && left) {
+            size_t n = left > 4096 ? 4096 : left;
+            ok = esp_http_client_write(c, (const char*)p, n) >= 0;
+            p += n; left -= n;
+        }
+        if (ok) ok = esp_http_client_write(c, post.data(), post.size()) >= 0;
+        if (ok) { esp_http_client_fetch_headers(c); ok = esp_http_client_get_status_code(c) / 100 == 2; }
+        esp_http_client_close(c);
+    }
+    esp_http_client_cleanup(c);
+    ESP_LOGI(TAG, "aec_capture upload %s samples=%u ok=%d", name, (unsigned)samples, (int)ok);
+    return ok;
+}
+
 static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     ESP_LOGI(TAG, "executing command=%s args=%s", cmd.action.c_str(), cmd.args_json.c_str());
     if (cmd.action == "reboot") {
@@ -401,6 +462,69 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
                  "ch1_delta=%.1f reference=%s",
                  r.silent_rms0, r.silent_rms1, r.play_rms0, r.play_rms1,
                  r.play_rms1 - r.silent_rms1, r.reference_is_real ? "REAL" : "FLOATING");
+        return std::string(buf);
+    }
+    if (cmd.action == "aec_capture") {
+        // Record raw mic (pre-AEC), the hardware reference, and the AFE clean
+        // output (post-AEC) while a burst plays, then upload all three as WAVs.
+        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
+        auto num = [&](const char* k, int dflt, int lo, int hi) {
+            cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
+            return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
+        };
+        const int secs   = num("seconds", 5, 1, 10);
+        const int settle = num("settle", 3, 0, 10);
+        const int vol    = num("volume", 100, 0, 100);
+        cJSON* tone_it = a ? cJSON_GetObjectItem(a, "tone") : nullptr;
+        const bool use_tone = cJSON_IsTrue(tone_it);
+        const char* tag = a ? [&]{ cJSON* t = cJSON_GetObjectItem(a, "tag");
+                                   return cJSON_IsString(t) ? t->valuestring : "run"; }() : "run";
+        std::string tagname = tag;
+        if (a) cJSON_Delete(a);
+
+        const size_t cap = (size_t)secs * 16000;
+        int16_t* bmic   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bref   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bclean = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        if (!bmic || !bref || !bclean) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "failed|stage=alloc";
+        }
+
+        static int16_t blk[256];
+        uint32_t rng = 0x12345678; double phase = 0.0;
+        const double inc = 2.0 * M_PI * 1000.0 / 16000.0;
+        auto burst = [&](int seconds) {
+            const int blocks = seconds * 16000 / 256;
+            for (int b = 0; b < blocks; ++b) {
+                for (int i = 0; i < 256; ++i) {
+                    if (use_tone) { blk[i] = (int16_t)(9000.0 * sin(phase)); phase += inc; }
+                    else { rng = rng * 1664525u + 1013904223u; blk[i] = (int16_t)((int32_t)(rng >> 16) % 9000); }
+                }
+                board_spk_write(blk, sizeof(blk));
+            }
+        };
+
+        board_set_volume(vol);
+        board_pa_enable(true);
+        if (settle > 0) burst(settle);            // let the adaptive filter converge
+        afe_capture_begin(bmic, bref, bclean, cap);
+        burst(secs);
+        size_t nm = 0, nr = 0, nc = 0;
+        afe_capture_end(&nm, &nr, &nc);
+        board_pa_enable(false);
+
+        const std::string base = tagname + "_" + (use_tone ? "tone" : "noise") + "_v" + std::to_string(vol);
+        const bool o1 = aec_upload_wav((base + "_1_mic_raw.wav").c_str(),   bmic,   nm);
+        const bool o2 = aec_upload_wav((base + "_2_reference.wav").c_str(), bref,   nr);
+        const bool o3 = aec_upload_wav((base + "_3_clean_aec.wav").c_str(), bclean, nc);
+        heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+
+        char buf[220];
+        snprintf(buf, sizeof(buf),
+                 "done|captured mic=%u ref=%u clean=%u uploads=%d/%d/%d base=%s secs=%d settle=%d vol=%d",
+                 (unsigned)nm, (unsigned)nr, (unsigned)nc, (int)o1, (int)o2, (int)o3,
+                 base.c_str(), secs, settle, vol);
         return std::string(buf);
     }
     if (cmd.action == "aec_erle") {
