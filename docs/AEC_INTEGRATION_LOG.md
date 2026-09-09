@@ -210,3 +210,160 @@ and running on the real device.** The port (afe_config_init / esp_afe_handle_fro
 `Serial('/dev/ttyACM0',115200)`, `setDTR(False); setRTS(True); sleep .1; setRTS(False)`
 to reset-into-app, then read. USB-JTAG re-enumerates on reset so re-open with retries;
 `usbipd attach --wsl --busid 2-5` if `/dev/ttyACM0` vanishes.
+
+## 2026-09-09 (cont.) — L0 PASSED, and the full cloud loop works
+
+### L0: hardware echo reference is REAL
+Ran `aec_probe` remotely (device-hub `_enqueue_mqtt_command` → retained MQTT topic
+`devices/esp32-s3-walle/command/<id>`; the plain `/api/device/{id}/command` HTTP route
+stores but does NOT publish MQTT, so it never reaches the device). ACK:
+
+```
+aec_probe done | silent_ch0=13.5 silent_ch1=0.6 play_ch0=1516.7 play_ch1=1720.7
+                 ch1_delta=1720.1 reference=REAL
+```
+
+Idle ref-channel RMS 0.6; with a 1 kHz tone playing it jumps to 1720. **ES7210 ch1 is a
+real hardware speaker loopback** → AEC uses the hardware reference (`CONFIG_AEC_SOFTWARE_REF=n`,
+the default). `"MR"` channel order confirmed: ch0 = mic, ch1 = reference.
+
+Note: `mic_asr_test` fails with `command task allocation failed` — no internal RAM left
+for another 8 KB task once the AFE is up. Its ASR call would also hit the :443 TLS wall.
+Not a blocker (it is the legacy half-duplex path), but it flags how tight internal RAM is.
+
+### Gateway: `/ws/audio` was never exposed
+`https://www.wangyutang.cn/ws/audio` → 404. The live Caddyfile (bind-mounted from
+`/root/wangyutang_platform/robot_gateway/Caddyfile`, NOT the stale
+`/root/wangyutang_platform/Caddyfile`) routes `/audio_interact/*`, `/devices/*`, `/common/*`
+… but had no `/ws/audio`. The audio-interact container itself answers a WS handshake on
+`ws://127.0.0.1:8097/ws/audio` fine (`stream_ready`, vad silero, proto 2).
+
+Added (backup `Caddyfile.bak-1788914715`, `caddy validate` + graceful `caddy reload`):
+```
+handle /ws/audio* {
+    reverse_proxy {$AUDIO_INTERACT_UPSTREAM:audio-interact:8097}
+}
+```
+`handle` (not `handle_path`) so the path passes through unchanged. Plain HTTP on
+`http://110.40.154.41` is an explicit site address in that block, so no HTTPS redirect —
+which is what the firmware needs since :443 is MITM-broken here.
+
+### Full loop confirmed end-to-end
+With fetch/uplink instrumentation (bf6), serial shows:
+
+```
+ws: rx text: {"type":"stream_ready","session_id":"esp32-...","device_id":"esp32-s3-walle",
+              "vad":"silero","sample_rate":16000,"proto":2}
+ws: uplink gated: ready=0 connected=0 sent=397 dropped=564     <- 397 PCM frames really went up
+afe: fetch: 1091 results size=1024 clean|abs=21 vad=1          <- AFE produces clean audio
+afe: feed:  2172 frames, last mic|abs=92 ref|abs=0
+cloud -> {"type":"vad","probability":0.03..0.82,"speaking":false->true}
+cloud -> {"type":"speech_start","probability":0.7059,"offset_seconds":4.608,...}
+cloud -> {"type":"result","text":"星星。","wake_status":"sleeping",...}
+```
+
+**A looping audio source next to the device → ES7210 mic → on-board esp-sr AFE
+(AEC/NS/VAD) → WS uplink → audio_interact Silero VAD → cloud ASR transcribed "星星。"**
+The whole full-duplex path works.
+
+### WS session instability → the cloud's VAD firehose
+The socket kept dropping and reconnecting. Cause: audio_interact streams a per-frame
+`{"type":"vad","probability":...}` message — 20–140/second. Every one of them cost the
+firmware a `malloc` for frame reassembly + a `cJSON_ParseWithLength` (+ the debug log)
+in the WS task, on top of already-tight internal RAM with the AFE running.
+
+Fix: `handle_text` drops `"type":"vad"` frames with a `memmem` check before any
+allocation, parse or log. Nothing in this firmware acts on them (barge-in uses the
+local AFE VAD plus the cloud's `speech_start`/`tts_cancel`).
+
+### Serial/tooling notes
+- `idf.py monitor` needs a TTY → unusable over SSH. Use pyserial: reset with
+  `setDTR(False); setRTS(True); sleep .1; setRTS(False)`, close, wait ~2.5 s for the
+  USB-CDC to re-enumerate, reopen with retries, then read.
+- `esptool --after hard_reset` is a no-op on USB-Serial-JTAG (no RTS pin) — after
+  `idf.py flash` the chip stays in the stub until you toggle the lines yourself.
+- The Tailscale link to `wsl` flaps; wrap SSH calls in retries.
+
+## 2026-09-10 — L1 PASSED: 36 dB ERLE
+
+### Result
+
+Quiet room, single talk, on-device `aec_erle` command (no cloud, no serial):
+
+| excitation | ERLE (converged) | ERLE (settle) | mic | ref | clean | idle_clean |
+|---|---|---|---|---|---|---|
+| noise vol=100 | **36.2 dB** | 28.3 | 1659.5 | 3654.2 | 25.7 | 94.4 |
+| noise vol=100 (repeat) | **35.1 dB** | 21.8 | 1655.3 | 3654.4 | 29.0 | 25.5 |
+| tone 1 kHz vol=100 | **26.9 dB** | 21.6 | 6847.4 | 8889.4 | 309.1 | 65.1 |
+| volume=0 (control) | 0.6 dB | 0.5 | 91.5 | 0.6 | 85.1 | 122.3 |
+
+- Reproducible at ~35–36 dB with broadband excitation, comfortably past the
+  ≥25 dB bar for a hardware reference.
+- Converged output (clean 25.7) is **below** the idle floor (94.4) — the echo is
+  gone, not merely attenuated.
+- Convergence goes the right way (settle < measure).
+- A pure 1 kHz sine reads ~9 dB lower: a single tone is poor excitation for an
+  adaptive filter. Broadband is the right test signal.
+- The `volume=0` control reads ~0 dB, proving the measurement plumbing itself is
+  not manufacturing the number.
+
+### The 5 dB red herring: double-talk protection
+
+Earlier runs with a looping audio source next to the device read only 4.7–5.9 dB,
+and got *worse* from settle to measure. That is not a defect — with near-end
+audio present the AEC's double-talk detector deliberately backs off suppression
+so it does not eat the user's speech. Removing the near-end source took the same
+test from 5 dB to 36 dB. **Always measure single-talk ERLE in a quiet room.**
+
+The naive `20*log10(mic/clean)` formula is also dominated by near-end energy,
+because the AEC correctly leaves near-end alone. Compensating with the idle floor
+(`echo_in = sqrt(mic^2 - near^2)` etc.) recovers a sane number, but a quiet room
+is simpler and unambiguous.
+
+### AFE config actually in effect (`afe_config_print` after `afe_config_check`)
+
+```
+pcm_config.total_ch_num: 2   mic_num: 1 [ch0]   ref_num: 1 [ch1]   sample_rate: 16000
+afe_type: VC        afe_mode: HIGH PERF        memory_alloc_mode: 3 (more PSRAM)
+aec_init: true      aec mode: VOIP_HIGH_PERF   aec_nlp_level: AGGRESSIVE
+aec_filter_length: 4
+se_init: false (BSS)   ns_init: true (WEBRTC)   vad_init: true (mode 3, WebRTC)
+agc_init: false        wakenet_init: false      afe_linear_gain: 1.0
+```
+Channel order matches the physical measurement from `aec_probe` (ch0 = mic,
+ch1 = hardware loopback), so `"MR"` is right. No model partition needed.
+
+### Control plane: everything off TLS
+
+`:443` is MITM-broken on this ISP path, so the WS audio uplink, MQTT control and
+device-hub HTTP all had to go plain:
+
+- MQTT `wss://www.wangyutang.cn/mqtt` → `ws://110.40.154.41/mqtt` (Caddy already
+  has `handle /mqtt*`). This restored commands **and** ACKs.
+- The device-hub heartbeat cannot carry commands: HTTPS fails, and the plain-HTTP
+  fallback returns an empty body (`heartbeat response bytes=0 body=`), so the
+  `{"commands":[...]}` payload never reaches the firmware. Commands go
+  `pending → dispatched` on the server and then nothing. Use MQTT.
+
+### Sizing lessons (internal RAM, not PSRAM)
+
+`free_heap` counts PSRAM and hid the real constraint. Added `free_internal` /
+`largest_internal` to the heartbeat: ~49 KB free, ~17 KB largest block with the
+AFE up.
+
+- ws_client `buffer_size`: 4 K saturated (uplink is 1 KB every ~32 ms; the socket
+  dropped after ~16 frames), 16 K fixed the drops but starved internal RAM until
+  `xTaskCreate` for the command worker failed. **8 K holds both.**
+- `mqtt_cmd` worker stack: 8192 → 4096 was too aggressive; the heavier `aec_erle`
+  handler overflowed it (`Backtrace: … 0xa5a5a5a5 |<-CORRUPTED`, `rst:0xc`).
+  Now 12288.
+- **Retained MQTT command + crashing handler = reboot loop.** The command replays
+  on every reconnect. Clear the retained topic (`_mqtt_clear_retained_command`)
+  to break it; the runner script now always clears after reading the ACK.
+
+### Status
+
+L0 (hardware reference REAL) and L1 (36 dB ERLE) both pass. Remaining from the
+verification plan: L4 (AEC on/off A/B via `CONFIG_AEC_ENABLE`), soak, and
+L2/L3 (double-talk word accuracy + barge-in latency) which need a controlled
+near-end source — the raspberrypi, once it is reachable again.
