@@ -5,6 +5,7 @@ mic/hardware-reference + ES8311 speaker). Firmware: this branch.
 
 | file | what it holds |
 |---|---|
+| `BENCH_PLAN.md` | **Current plan.** Pi TTS as a known-text near end + cloud ASR as the judge: the rig, the scoring (S_recall / E_leak), the Pi×ESP32 volume matrix, and the OTA-first steps to get there |
 | `RESULTS.md` | L0 (hardware reference real), L1 (single-talk ERLE), L4 (AEC on/off A/B) — the numbers |
 | `TTS_DOUBLETALK.md` | Double talk with **real TTS speech** as the far end (the product case): before AEC the cloud hears only the robot, after AEC it transcribes the room |
 | `NLP_LEVEL_AB.md` | `aec_nlp_level` AGGR vs NORMAL — identical within 1 dB, so NS and not the AEC's NLP is what sets the output level. Also why the "loses the near end at volume 60" boundary in `TTS_DOUBLETALK.md` did not reproduce |
