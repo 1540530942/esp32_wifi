@@ -268,6 +268,56 @@ static void aec_on_tts_state(bool playing) {
     ws_client_report_tts_state(playing);
 }
 
+// --- continuous far end ----------------------------------------------------
+// aec_capture drives playback itself, so the echo only exists while a capture
+// runs. That is fine for a single window, but it cannot produce the case the
+// acceptance criteria care about: a minute of unbroken robot speech, sampled at
+// several points. The AFE's NS noise estimate adapts to a *sustained* source and
+// relaxes when it stops, so segments separated by silence are not slices of one
+// scene -- each one restarts the adaptation.
+//
+// far_end plays a TTS clip on loop in its own task and returns immediately, so
+// captures with no_play can sample inside it.
+static TaskHandle_t s_farend_task = nullptr;
+static volatile bool s_farend_playing = false;
+static volatile bool s_farend_stop = false;
+static int16_t* s_farend_pcm = nullptr;      // cached clip, kept between runs
+static size_t s_farend_nsamp = 0;
+static std::string s_farend_text;            // which text the cached clip is
+static uint8_t s_farend_vol = 60;
+static int s_farend_seconds = 60;
+
+// One long-lived task, created on first use and never deleted. Creating it per
+// run failed with no_task: FreeRTOS reclaims a self-deleted task's stack only
+// when the idle task next runs, so starting the next one immediately could not
+// find a contiguous 4 KB in the ~38 KB of internal RAM left once the AFE is up.
+// Same failure mode, and same fix, as the per-command MQTT task earlier.
+static void farend_task(void*) {
+    for (;;) {
+        if (!s_farend_playing) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        board_set_volume(s_farend_vol);
+        board_pa_enable(true);
+        const double step = 24000.0 / 16000.0;
+        static int16_t out[256];
+        size_t oi = 0; double pos = 0.0;
+        const int64_t t0 = esp_timer_get_time();
+        const int64_t limit = (int64_t)s_farend_seconds * 1000000;
+        while (!s_farend_stop && (esp_timer_get_time() - t0) < limit) {
+            if (pos >= (double)s_farend_nsamp - 1.0) pos = 0.0;
+            size_t i0 = (size_t)pos;
+            double fr = pos - i0;
+            out[oi++] = (int16_t)(s_farend_pcm[i0] + (s_farend_pcm[i0 + 1] - s_farend_pcm[i0]) * fr);
+            if (oi == 256) { board_spk_write(out, sizeof(out)); oi = 0; }
+            pos += step;
+        }
+        board_pa_enable(false);
+        s_farend_playing = false;
+    }
+}
+
 // --- capture upload ---------------------------------------------------------
 // Wrap mono 16-bit PCM as a WAV and multipart-POST it to device-hub, which
 // stores it under its audio dir and hands back a URL. Plain HTTP on the gateway
@@ -300,9 +350,13 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples)
     const size_t total = pre.size() + sizeof(hdr) + data_bytes + post.size();
 
     esp_http_client_config_t cfg = {};
-    cfg.url = "http://110.40.154.41/devices/api/device/" CONFIG_DEVICE_ID "/upload_audio";
+    cfg.url = "http://110.40.154.41/devices/api/device/" CONFIG_DEVICE_ID "/upload_audio?play=0";
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = 30000;
+    // A 20 s capture is 640 KB and uploads inside 30 s; a 30 s one is 960 KB
+    // and does not, which showed up as uploads=0/0/0 with the capture itself
+    // reporting success. device_hub accepts up to 20 MB, so the ceiling was
+    // only ever this timeout.
+    cfg.timeout_ms = 120000;
     cfg.buffer_size = 1024;
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) return false;
@@ -449,6 +503,60 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         esp_restart();
         return "done";  // not reached
     }
+    if (cmd.action == "far_end_stop") {
+        s_farend_stop = true;
+        for (int i = 0; i < 50 && s_farend_playing; ++i) vTaskDelay(pdMS_TO_TICKS(100));
+        return s_farend_playing ? "failed|stage=farend_stop" : "done|far_end stopped";
+    }
+    if (cmd.action == "far_end") {
+        if (s_farend_playing) return "failed|stage=farend error=already_running";
+        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
+        cJSON* t_it = a ? cJSON_GetObjectItem(a, "text") : nullptr;
+        cJSON* v_it = a ? cJSON_GetObjectItem(a, "volume") : nullptr;
+        cJSON* s_it = a ? cJSON_GetObjectItem(a, "seconds") : nullptr;
+        std::string ftext = cJSON_IsString(t_it) ? t_it->valuestring : "";
+        s_farend_vol = cJSON_IsNumber(v_it) ? (uint8_t)v_it->valueint : 60;
+        s_farend_seconds = cJSON_IsNumber(s_it) ? s_it->valueint : 60;
+        if (a) cJSON_Delete(a);
+        if (ftext.empty()) return "failed|stage=farend error=missing_text";
+        if (s_farend_seconds < 1 || s_farend_seconds > 300) return "failed|stage=farend error=bad_seconds";
+
+        // Synthesize only when the text changed. Re-fetching cost ~12 s for the
+        // 33-character script and failed intermittently; keeping the clip also
+        // makes the far end byte-identical from run to run, which is what lets
+        // two scenes be compared as the same stimulus.
+        bool cached = (s_farend_pcm && ftext == s_farend_text);
+        if (!cached) {
+            uint8_t* wav = nullptr; size_t wlen = 0;
+            if (player->fetch_tts(ftext, &wav, &wlen) != ESP_OK || wlen < 44) {
+                return "failed|stage=farend_tts";
+            }
+            size_t nsamp = (wlen - 44) / sizeof(int16_t);
+            int16_t* pcm = (int16_t*)heap_caps_malloc(nsamp * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            if (!pcm) { heap_caps_free(wav); return "failed|stage=farend error=no_mem"; }
+            memcpy(pcm, wav + 44, nsamp * sizeof(int16_t));
+            heap_caps_free(wav);
+            if (s_farend_pcm) heap_caps_free(s_farend_pcm);
+            s_farend_pcm = pcm; s_farend_nsamp = nsamp; s_farend_text = ftext;
+        }
+
+        if (!s_farend_task &&
+            xTaskCreate(farend_task, "farend", 4096, nullptr, 4, &s_farend_task) != pdPASS) {
+            return "failed|stage=farend error=no_task";
+        }
+        s_farend_stop = false;
+        s_farend_playing = true;
+        char msg[160];
+        snprintf(msg, sizeof(msg), "done|far_end started secs=%d vol=%d clip_ms=%u src=%s",
+                 s_farend_seconds, (int)s_farend_vol,
+                 (unsigned)(s_farend_nsamp * 1000 / 24000), cached ? "cache" : "tts");
+        return std::string(msg);
+    }
+    if (cmd.action == "aec_config") {
+        char sum[160];
+        afe_config_summary(sum, sizeof(sum));
+        return std::string("done|") + sum;
+    }
     if (cmd.action == "aec_probe") {
         if (player->is_playing()) return "failed|busy";
         esp_err_t err = player->run_aec_reference_probe();
@@ -485,6 +593,9 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         // (the robot talking while someone speaks to it).
         cJSON* text_it = a ? cJSON_GetObjectItem(a, "text") : nullptr;
         std::string tts_text = cJSON_IsString(text_it) ? text_it->valuestring : "";
+        // Record without driving playback: used to sample inside a far_end run.
+        cJSON* np_it = a ? cJSON_GetObjectItem(a, "no_play") : nullptr;
+        const bool no_play = cJSON_IsTrue(np_it);
         const char* tag = a ? [&]{ cJSON* t = cJSON_GetObjectItem(a, "tag");
                                    return cJSON_IsString(t) ? t->valuestring : "run"; }() : "run";
         std::string tagname = tag;
@@ -514,7 +625,12 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         };
 
         size_t nm = 0, nr = 0, nc = 0;
-        if (!tts_text.empty()) {
+        if (no_play) {
+            if (settle > 0) vTaskDelay(pdMS_TO_TICKS(settle * 1000));
+            afe_capture_begin(bmic, bref, bclean, cap);
+            vTaskDelay(pdMS_TO_TICKS(secs * 1000));
+            afe_capture_end(&nm, &nr, &nc);
+        } else if (!tts_text.empty()) {
             uint8_t* twav = nullptr; size_t tlen = 0;
             if (player->fetch_tts(tts_text, &twav, &tlen) != ESP_OK || tlen < 44) {
                 heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
@@ -581,7 +697,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             board_pa_enable(false);
         }
 
-        const std::string base = tagname + "_" + (!tts_text.empty() ? "tts" : (!play_url.empty() ? "speech" : (use_tone ? "tone" : "noise"))) + "_v" + std::to_string(vol);
+        const std::string base = tagname + "_" + (no_play ? "sample" : !tts_text.empty() ? "tts" : (!play_url.empty() ? "speech" : (use_tone ? "tone" : "noise"))) + "_v" + std::to_string(vol);
         const bool o1 = aec_upload_wav((base + "_1_mic_raw.wav").c_str(),   bmic,   nm);
         const bool o2 = aec_upload_wav((base + "_2_reference.wav").c_str(), bref,   nr);
         const bool o3 = aec_upload_wav((base + "_3_clean_aec.wav").c_str(), bclean, nc);

@@ -20,6 +20,15 @@
 #define AEC_NLP_LEVEL AEC_NLP_LEVEL_AGGR
 #endif
 
+// WebRTC noise suppression, the stage between the AEC and the VAD.
+// AFE_TYPE_VC turns it on by default, and docs/aec/FINDING_ns_vs_asr.md shows
+// it is what costs uplink ASR accuracy: it learns any sustained sound as
+// background and masks it away, erasing trailing phonemes. Set to 0 to take it
+// out of the pipeline and hand the AEC output straight to the VAD.
+#ifndef AEC_NS_ENABLE
+#define AEC_NS_ENABLE 1
+#endif
+
 #define AEC_WS_PROTO         2
 #define AEC_PLAYBACK_QUEUE_LEN   12
 #define AEC_PLAYBACK_CHUNK_MAX   (64 * 1024)

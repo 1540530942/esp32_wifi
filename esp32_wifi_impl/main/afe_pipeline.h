@@ -29,5 +29,12 @@ void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms);
 // Records the two things you need to hear an AEC working: the raw microphone
 // channel (echo included, pre-AFE) and the AFE's clean output (post-AEC), plus
 // the hardware reference channel. Buffers are caller-owned int16 mono @16 kHz.
+// --- live config readback ---------------------------------------------------
+// Writes the AFE settings that actually took effect (after afe_config_check(),
+// which silently rewrites conflicting fields) into buf as "k=v k=v ...".
+// Reading these off the serial console needs USB; this lets the same facts come
+// back over MQTT in a command reply, so a headless board can be verified.
+void afe_config_summary(char *buf, size_t n);
+
 void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples);
 void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);

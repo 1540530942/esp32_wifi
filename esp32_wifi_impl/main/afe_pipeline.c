@@ -3,6 +3,7 @@
 #include "afe_board.h"
 #include "playback.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -22,6 +23,7 @@
 
 static const char *TAG = "afe";
 
+static char s_cfg_summary[160] = "(afe not initialised)";
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t  *s_afe_data;
 static afe_audio_cb_t      s_audio_cb;
@@ -226,7 +228,14 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     // Set explicitly rather than relying on the AFE_TYPE_VC default, so the
     // level a given build was measured at is visible in the source.
     cfg->aec_nlp_level = AEC_NLP_LEVEL;
+    cfg->ns_init = (AEC_NS_ENABLE != 0);
     afe_config_check(cfg);
+    // Snapshot post-check, so what is reported is what the AFE really runs with.
+    snprintf(s_cfg_summary, sizeof(s_cfg_summary),
+             "fmt=%s type=VC aec=%d nlp=%d filt=%d ns=%d vad=%d rate=%d",
+             fmt, (int)cfg->aec_init, (int)cfg->aec_nlp_level,
+             (int)cfg->aec_filter_length, (int)cfg->ns_init,
+             (int)cfg->vad_init, (int)cfg->pcm_config.sample_rate);
     // Dump what the AFE actually ended up with -- afe_config_check() silently
     // rewrites conflicting fields, and the AEC mode / filter length it picks
     // decides how much echo we can cancel.
@@ -293,4 +302,10 @@ void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n)
     if (mic_n)   *mic_n   = s_cap_i_in;
     if (ref_n)   *ref_n   = s_cap_i_in;
     if (clean_n) *clean_n = s_cap_i_out;
+}
+
+void afe_config_summary(char *buf, size_t n)
+{
+    if (!buf || n == 0) return;
+    snprintf(buf, n, "%s", s_cfg_summary);
 }
