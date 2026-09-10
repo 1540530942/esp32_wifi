@@ -28,6 +28,13 @@ esp_err_t playback_enqueue_wav(const uint8_t *wav, size_t len);
 // fixture -- can honour the duck too, instead of playing straight through it.
 int playback_gain_pct(void);
 
+// Mark the speaker as busy with audio this module did not queue -- the far_end
+// test fixture writes to the codec directly. Barge-in is gated on
+// playback_is_playing(), so without this the detector never even evaluates while
+// the fixture is playing, and no interruption can be measured. Also restarts the
+// turn clock that the onset grace is measured against.
+void playback_set_external_active(bool active);
+
 void playback_duck(void);
 void playback_unduck(void);
 

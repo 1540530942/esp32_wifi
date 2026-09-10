@@ -25,6 +25,7 @@ static volatile bool s_killed;                // discard until next begin_turn
 static volatile bool s_busy;                  // a chunk is being written
 static volatile int  s_gain_pct = 100;        // duck applies here
 static volatile int64_t s_turn_start_us;
+static volatile bool s_external_active;
 static playback_state_cb_t s_state_cb;
 static volatile bool s_last_reported_playing;
 
@@ -203,7 +204,14 @@ void playback_kill(void)
 
 bool playback_is_playing(void)
 {
-    return s_busy || uxQueueMessagesWaiting(s_queue) > 0;
+    return s_busy || s_external_active || uxQueueMessagesWaiting(s_queue) > 0;
+}
+
+void playback_set_external_active(bool active)
+{
+    if (active) s_turn_start_us = esp_timer_get_time();
+    s_external_active = active;
+    if (!active) playback_unduck();
 }
 
 int64_t playback_turn_age_ms(void)

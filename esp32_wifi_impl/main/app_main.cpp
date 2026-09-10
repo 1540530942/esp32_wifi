@@ -286,6 +286,7 @@ static size_t s_farend_nsamp = 0;
 static std::string s_farend_text;            // which text the cached clip is
 static uint8_t s_farend_vol = 60;
 static int s_farend_seconds = 60;
+static bool s_farend_noise = false;          // steady excitation instead of a clip
 
 // One long-lived task, created on first use and never deleted. Creating it per
 // run failed with no_task: FreeRTOS reclaims a self-deleted task's stack only
@@ -300,25 +301,35 @@ static void farend_task(void*) {
         }
         board_set_volume(s_farend_vol);
         board_pa_enable(true);
+        playback_set_external_active(true);
         const double step = 24000.0 / 16000.0;
         static int16_t out[256];
-        size_t oi = 0; double pos = 0.0;
+        size_t oi = 0; double pos = 0.0; uint32_t rng = 0x12345678;
         const int64_t t0 = esp_timer_get_time();
         const int64_t limit = (int64_t)s_farend_seconds * 1000000;
         while (!s_farend_stop && (esp_timer_get_time() - t0) < limit) {
-            if (pos >= (double)s_farend_nsamp - 1.0) pos = 0.0;
-            size_t i0 = (size_t)pos;
-            double fr = pos - i0;
+            int32_t v;
+            if (s_farend_noise) {
+                // Speech is the right far end for the ASR gates and the wrong one
+                // for timing: it pauses between sentences, so a dip in the
+                // reference channel cannot be told apart from a duck. Broadband
+                // noise holds a flat envelope, which makes any drop unambiguous.
+                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                v = ((int32_t)(rng & 0xFFFF) - 32768) / 4;
+            } else {
+                if (pos >= (double)s_farend_nsamp - 1.0) pos = 0.0;
+                size_t i0 = (size_t)pos;
+                double fr = pos - i0;
+                v = (int32_t)(s_farend_pcm[i0] + (s_farend_pcm[i0 + 1] - s_farend_pcm[i0]) * fr);
+                pos += step;
+            }
             // Honour barge-in. playback_duck() only lowers the gain inside
             // playback.c, and this writes to the codec directly, so without
-            // this the far end played straight through an interruption -- and
-            // the reference channel showed no duck at all, which made the
-            // barge-in latency unmeasurable.
-            int32_t v = (int32_t)(s_farend_pcm[i0] + (s_farend_pcm[i0 + 1] - s_farend_pcm[i0]) * fr);
+            // this the far end plays straight through an interruption.
             out[oi++] = (int16_t)(v * playback_gain_pct() / 100);
             if (oi == 256) { board_spk_write(out, sizeof(out)); oi = 0; }
-            pos += step;
         }
+        playback_set_external_active(false);
         board_pa_enable(false);
         s_farend_playing = false;
     }
@@ -523,7 +534,22 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         std::string ftext = cJSON_IsString(t_it) ? t_it->valuestring : "";
         s_farend_vol = cJSON_IsNumber(v_it) ? (uint8_t)v_it->valueint : 60;
         s_farend_seconds = cJSON_IsNumber(s_it) ? s_it->valueint : 60;
-        if (a) cJSON_Delete(a);
+        cJSON* a2 = a;
+        cJSON* m_it = a2 ? cJSON_GetObjectItem(a2, "mode") : nullptr;
+        s_farend_noise = (cJSON_IsString(m_it) && std::string(m_it->valuestring) == "noise");
+        if (s_farend_noise) {
+            if (s_farend_seconds < 1 || s_farend_seconds > 300) return "failed|stage=farend error=bad_seconds";
+            if (!s_farend_task &&
+                xTaskCreate(farend_task, "farend", 4096, nullptr, 4, &s_farend_task) != pdPASS) {
+                return "failed|stage=farend error=no_task";
+            }
+            s_farend_stop = false;
+            s_farend_playing = true;
+            char nmsg[96];
+            snprintf(nmsg, sizeof(nmsg), "done|far_end started secs=%d vol=%d src=noise",
+                     s_farend_seconds, (int)s_farend_vol);
+            return std::string(nmsg);
+        }
         if (ftext.empty()) return "failed|stage=farend error=missing_text";
         if (s_farend_seconds < 1 || s_farend_seconds > 300) return "failed|stage=farend error=bad_seconds";
 
@@ -535,6 +561,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         if (!cached) {
             uint8_t* wav = nullptr; size_t wlen = 0;
             if (player->fetch_tts(ftext, &wav, &wlen) != ESP_OK || wlen < 44) {
+                if (a2) cJSON_Delete(a2);
                 return "failed|stage=farend_tts";
             }
             size_t nsamp = (wlen - 44) / sizeof(int16_t);
@@ -550,6 +577,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             xTaskCreate(farend_task, "farend", 4096, nullptr, 4, &s_farend_task) != pdPASS) {
             return "failed|stage=farend error=no_task";
         }
+        if (a2) cJSON_Delete(a2);
         s_farend_stop = false;
         s_farend_playing = true;
         char msg[160];
