@@ -5,6 +5,7 @@ mic/hardware-reference + ES8311 speaker). Firmware: this branch.
 
 | file | what it holds |
 |---|---|
+| `RUN_2026-09-10.md` | **First 60 s run.** Human-voice ASR through clean_aec, zero echo leak, and the three things fixed to get there |
 | `ACCEPTANCE.md` | **What counts as passing.** Gates G0-G6 with numeric thresholds, the 60 s scene definition, and why 60 s rather than 15 |
 | `BENCH_PLAN.md` | **Current plan.** Pi TTS as a known-text near end + cloud ASR as the judge: the rig, the scoring (S_recall / E_leak), the Pi×ESP32 volume matrix, and the OTA-first steps to get there |
 | `RESULTS.md` | L0 (hardware reference real), L1 (single-talk ERLE), L4 (AEC on/off A/B) — the numbers |
