@@ -309,7 +309,13 @@ static void farend_task(void*) {
             if (pos >= (double)s_farend_nsamp - 1.0) pos = 0.0;
             size_t i0 = (size_t)pos;
             double fr = pos - i0;
-            out[oi++] = (int16_t)(s_farend_pcm[i0] + (s_farend_pcm[i0 + 1] - s_farend_pcm[i0]) * fr);
+            // Honour barge-in. playback_duck() only lowers the gain inside
+            // playback.c, and this writes to the codec directly, so without
+            // this the far end played straight through an interruption -- and
+            // the reference channel showed no duck at all, which made the
+            // barge-in latency unmeasurable.
+            int32_t v = (int32_t)(s_farend_pcm[i0] + (s_farend_pcm[i0 + 1] - s_farend_pcm[i0]) * fr);
+            out[oi++] = (int16_t)(v * playback_gain_pct() / 100);
             if (oi == 256) { board_spk_write(out, sizeof(out)); oi = 0; }
             pos += step;
         }

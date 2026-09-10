@@ -188,6 +188,7 @@ esp_err_t playback_enqueue_wav(const uint8_t *wav, size_t len)
     return ESP_OK;
 }
 
+int  playback_gain_pct(void) { return s_gain_pct; }
 void playback_duck(void)   { s_gain_pct = CONFIG_AEC_DUCK_VOLUME_PCT; }
 void playback_unduck(void) { s_gain_pct = 100; }
 

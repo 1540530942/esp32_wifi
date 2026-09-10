@@ -23,6 +23,11 @@ void playback_begin_turn(void);
 esp_err_t playback_enqueue_wav(const uint8_t *wav, size_t len);
 
 // Barge-in level 1: lower volume, recoverable.
+// Current output gain in percent, 100 unless barge-in has ducked. Exposed so
+// anything that writes to the speaker outside this module -- the far_end test
+// fixture -- can honour the duck too, instead of playing straight through it.
+int playback_gain_pct(void);
+
 void playback_duck(void);
 void playback_unduck(void);
 
