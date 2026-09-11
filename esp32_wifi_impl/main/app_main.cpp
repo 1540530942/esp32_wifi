@@ -83,6 +83,33 @@ static void persist_volume() {
                                 esp_err_to_name(err));
 }
 
+// Two credential pairs, tried in turn. A single compiled-in SSID makes every
+// network change a one-way trip: the device reboots onto credentials that may
+// not resolve, and with no rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is
+// off) and OTA gone with the network, only physical USB gets it back. Falling
+// back to the previous network keeps it reachable while a new one is being
+// introduced.
+struct WifiCred { const char* ssid; const char* pass; };
+static const WifiCred s_wifi_creds[] = {
+    { CONFIG_DEVICE_WIFI_SSID,  CONFIG_DEVICE_WIFI_PASSWORD  },
+    { CONFIG_DEVICE_WIFI_SSID2, CONFIG_DEVICE_WIFI_PASSWORD2 },
+};
+static size_t s_wifi_idx = 0;
+static int s_wifi_fails = 0;
+
+// Apply s_wifi_creds[s_wifi_idx] to the station config.
+static void wifi_apply_cred(void) {
+    wifi_config_t cfg = {};
+    std::strncpy(reinterpret_cast<char*>(cfg.sta.ssid),
+                 s_wifi_creds[s_wifi_idx].ssid, sizeof(cfg.sta.ssid) - 1);
+    std::strncpy(reinterpret_cast<char*>(cfg.sta.password),
+                 s_wifi_creds[s_wifi_idx].pass, sizeof(cfg.sta.password) - 1);
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    ESP_LOGI(TAG, "Wi-Fi trying SSID[%u]=\"%s\"",
+             (unsigned)s_wifi_idx, s_wifi_creds[s_wifi_idx].ssid);
+}
+
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* arg) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -91,6 +118,19 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
         lcd_print_line(0, "ESP32  OFFLINE  ");
         lcd_print_line(1, "                ");
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
+        // Give each SSID a few attempts before rotating -- a transient drop on
+        // the right network should not push us onto the wrong one. Entries with
+        // an empty SSID are skipped, so a single configured network behaves
+        // exactly as before.
+        const size_t n = sizeof(s_wifi_creds) / sizeof(s_wifi_creds[0]);
+        if (++s_wifi_fails >= 3) {
+            s_wifi_fails = 0;
+            for (size_t i = 0; i < n; ++i) {
+                s_wifi_idx = (s_wifi_idx + 1) % n;
+                if (s_wifi_creds[s_wifi_idx].ssid[0]) break;
+            }
+            wifi_apply_cred();
+        }
         esp_wifi_connect();
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -100,6 +140,7 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
                  IP2STR(&event->ip_info.gw));
         esp_ip4addr_ntoa(&event->ip_info.ip, s_lcd_ip, sizeof(s_lcd_ip));
         lcd_print_line(1, s_lcd_ip);
+        s_wifi_fails = 0;
         xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -114,12 +155,13 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr));
-    wifi_config_t config = {};
-    std::strncpy(reinterpret_cast<char*>(config.sta.ssid), CONFIG_DEVICE_WIFI_SSID, sizeof(config.sta.ssid));
-    std::strncpy(reinterpret_cast<char*>(config.sta.password), CONFIG_DEVICE_WIFI_PASSWORD, sizeof(config.sta.password));
-    config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
+    // Start on the first entry that actually has an SSID.
+    const size_t ncred = sizeof(s_wifi_creds) / sizeof(s_wifi_creds[0]);
+    for (size_t i = 0; i < ncred; ++i) {
+        if (s_wifi_creds[i].ssid[0]) { s_wifi_idx = i; break; }
+    }
+    wifi_apply_cred();
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
@@ -353,8 +395,16 @@ static void aec_wav_header(uint8_t* h, uint32_t data_bytes, uint32_t rate) {
     h[40]=data_bytes&0xff; h[41]=(data_bytes>>8)&0xff; h[42]=(data_bytes>>16)&0xff; h[43]=(data_bytes>>24)&0xff;
 }
 
+// Internal-heap delta accumulated across uploads. Bench measurements put the
+// loss at a flat 250 bytes per scene over three independent batches, and a scene
+// is one capture and three uploads; this attributes it. Reported in the
+// aec_capture reply so a headless board can be measured without serial.
+static int32_t s_upload_leak = 0;
+static int32_t s_capture_leak = 0;
+
 static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples) {
     if (!pcm || samples == 0) return false;
+    const int32_t heap_in = (int32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const size_t data_bytes = samples * sizeof(int16_t);
     uint8_t hdr[44];
     aec_wav_header(hdr, (uint32_t)data_bytes, 16000);
@@ -396,7 +446,11 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples)
         esp_http_client_close(c);
     }
     esp_http_client_cleanup(c);
-    ESP_LOGI(TAG, "aec_capture upload %s samples=%u ok=%d", name, (unsigned)samples, (int)ok);
+    const int32_t heap_out = (int32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    s_upload_leak += heap_in - heap_out;
+    ESP_LOGI(TAG, "aec_capture upload %s samples=%u ok=%d heap %d->%d d=%d",
+             name, (unsigned)samples, (int)ok, (int)heap_in, (int)heap_out,
+             (int)(heap_in - heap_out));
     return ok;
 }
 
@@ -607,6 +661,8 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         return std::string(buf);
     }
     if (cmd.action == "aec_capture") {
+        const int32_t cap_heap_in = (int32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const int32_t up_leak_in = s_upload_leak;
         // Record raw mic (pre-AEC), the hardware reference, and the AFE clean
         // output (post-AEC) while a burst plays, then upload all three as WAVs.
         cJSON* a = cJSON_Parse(cmd.args_json.c_str());
@@ -739,9 +795,11 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
 
         char buf[220];
         snprintf(buf, sizeof(buf),
-                 "done|captured mic=%u ref=%u clean=%u uploads=%d/%d/%d base=%s secs=%d settle=%d vol=%d",
+                 "done|captured mic=%u ref=%u clean=%u uploads=%d/%d/%d base=%s secs=%d settle=%d vol=%d cap_d=%d up_d=%d",
                  (unsigned)nm, (unsigned)nr, (unsigned)nc, (int)o1, (int)o2, (int)o3,
-                 base.c_str(), secs, settle, vol);
+                 base.c_str(), secs, settle, vol,
+                 (int)(cap_heap_in - (int32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 (int)(s_upload_leak - up_leak_in));
         return std::string(buf);
     }
     if (cmd.action == "aec_erle") {

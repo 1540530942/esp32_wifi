@@ -8,6 +8,14 @@ config DEVICE_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
 
+config DEVICE_WIFI_SSID2
+    string "Fallback Wi-Fi SSID (empty to disable)"
+    default ""
+
+config DEVICE_WIFI_PASSWORD2
+    string "Fallback Wi-Fi password"
+    default ""
+
 config DEVICE_HUB_BASE_URL
     string "Device hub base URL"
     default "https://www.wangyutang.cn/devices/api"
