@@ -83,19 +83,48 @@ static void persist_volume() {
                                 esp_err_to_name(err));
 }
 
-// Two credential pairs, tried in turn. A single compiled-in SSID makes every
-// network change a one-way trip: the device reboots onto credentials that may
-// not resolve, and with no rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is
-// off) and OTA gone with the network, only physical USB gets it back. Falling
-// back to the previous network keeps it reachable while a new one is being
-// introduced.
-struct WifiCred { const char* ssid; const char* pass; };
-static const WifiCred s_wifi_creds[] = {
-    { CONFIG_DEVICE_WIFI_SSID,  CONFIG_DEVICE_WIFI_PASSWORD  },
-    { CONFIG_DEVICE_WIFI_SSID2, CONFIG_DEVICE_WIFI_PASSWORD2 },
-};
+// Credentials tried in turn: a cloud-pushed one (stored in NVS, tried first
+// when present) ahead of the two compiled-in ones. A single compiled-in SSID
+// makes every network change a one-way trip: the device reboots onto
+// credentials that may not resolve, and with no rollback
+// (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is off) and OTA gone with the
+// network, only physical USB gets it back. The NVS slot lets the cloud
+// introduce a new network without a rebuild+OTA cycle; falling back to the
+// compiled-in pair keeps the device reachable if that new network is wrong.
+struct WifiCred { char ssid[33]; char pass[65]; };
+static WifiCred s_wifi_creds[3];
+static size_t s_wifi_cred_count = 0;
 static size_t s_wifi_idx = 0;
 static int s_wifi_fails = 0;
+
+static const char* kWifiRemoteNvsNamespace = "wifi_remote";
+
+// (Re)build s_wifi_creds: slot 0 is the NVS-stored remote credential if one
+// is saved and non-empty, followed by the compiled-in primary and backup.
+// Called at boot and again whenever the cloud pushes a new remote credential.
+static void wifi_load_creds(void) {
+    size_t n = 0;
+    nvs_handle_t h;
+    if (nvs_open(kWifiRemoteNvsNamespace, NVS_READONLY, &h) == ESP_OK) {
+        size_t slen = sizeof(s_wifi_creds[0].ssid);
+        if (nvs_get_str(h, "ssid", s_wifi_creds[0].ssid, &slen) == ESP_OK &&
+            s_wifi_creds[0].ssid[0]) {
+            size_t plen = sizeof(s_wifi_creds[0].pass);
+            if (nvs_get_str(h, "pass", s_wifi_creds[0].pass, &plen) != ESP_OK) {
+                s_wifi_creds[0].pass[0] = '\0';
+            }
+            n = 1;
+        }
+        nvs_close(h);
+    }
+    std::strncpy(s_wifi_creds[n].ssid, CONFIG_DEVICE_WIFI_SSID, sizeof(s_wifi_creds[n].ssid) - 1);
+    std::strncpy(s_wifi_creds[n].pass, CONFIG_DEVICE_WIFI_PASSWORD, sizeof(s_wifi_creds[n].pass) - 1);
+    if (s_wifi_creds[n].ssid[0]) ++n;
+    std::strncpy(s_wifi_creds[n].ssid, CONFIG_DEVICE_WIFI_SSID2, sizeof(s_wifi_creds[n].ssid) - 1);
+    std::strncpy(s_wifi_creds[n].pass, CONFIG_DEVICE_WIFI_PASSWORD2, sizeof(s_wifi_creds[n].pass) - 1);
+    if (s_wifi_creds[n].ssid[0]) ++n;
+    s_wifi_cred_count = n;
+}
 
 // Apply s_wifi_creds[s_wifi_idx] to the station config.
 static void wifi_apply_cred(void) {
@@ -106,8 +135,8 @@ static void wifi_apply_cred(void) {
                  s_wifi_creds[s_wifi_idx].pass, sizeof(cfg.sta.password) - 1);
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    ESP_LOGI(TAG, "Wi-Fi trying SSID[%u]=\"%s\"",
-             (unsigned)s_wifi_idx, s_wifi_creds[s_wifi_idx].ssid);
+    ESP_LOGI(TAG, "Wi-Fi trying SSID[%u/%u]=\"%s\"",
+             (unsigned)s_wifi_idx, (unsigned)s_wifi_cred_count, s_wifi_creds[s_wifi_idx].ssid);
 }
 
 static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* arg) {
@@ -118,18 +147,16 @@ static void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void* a
         lcd_print_line(0, "ESP32  OFFLINE  ");
         lcd_print_line(1, "                ");
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
-        // Give each SSID a few attempts before rotating -- a transient drop on
-        // the right network should not push us onto the wrong one. Entries with
-        // an empty SSID are skipped, so a single configured network behaves
-        // exactly as before.
-        const size_t n = sizeof(s_wifi_creds) / sizeof(s_wifi_creds[0]);
+        // Give each credential a few attempts before rotating -- a transient
+        // drop on the right network should not push us onto the wrong one.
+        // wifi_load_creds() only ever populates non-empty, contiguous slots,
+        // so no skip-empty step is needed here.
         if (++s_wifi_fails >= 3) {
             s_wifi_fails = 0;
-            for (size_t i = 0; i < n; ++i) {
-                s_wifi_idx = (s_wifi_idx + 1) % n;
-                if (s_wifi_creds[s_wifi_idx].ssid[0]) break;
+            if (s_wifi_cred_count > 0) {
+                s_wifi_idx = (s_wifi_idx + 1) % s_wifi_cred_count;
+                wifi_apply_cred();
             }
-            wifi_apply_cred();
         }
         esp_wifi_connect();
     }
@@ -156,11 +183,10 @@ static void init_wifi() {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    // Start on the first entry that actually has an SSID.
-    const size_t ncred = sizeof(s_wifi_creds) / sizeof(s_wifi_creds[0]);
-    for (size_t i = 0; i < ncred; ++i) {
-        if (s_wifi_creds[i].ssid[0]) { s_wifi_idx = i; break; }
-    }
+    // Always try a cloud-pushed remote credential first if one is stored;
+    // wifi_load_creds() puts it in slot 0 whenever it is present.
+    wifi_load_creds();
+    s_wifi_idx = 0;
     wifi_apply_cred();
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
@@ -573,6 +599,53 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         vTaskDelay(pdMS_TO_TICKS(800));
         esp_restart();
         return "done";  // not reached
+    }
+    if (cmd.action == "wifi_set_remote") {
+        cJSON* args = cJSON_Parse(cmd.args_json.c_str());
+        cJSON* ssid_item = args ? cJSON_GetObjectItem(args, "ssid") : nullptr;
+        if (!cJSON_IsString(ssid_item)) {
+            if (args) cJSON_Delete(args);
+            return "failed|stage=wifi_set_remote error=missing_ssid";
+        }
+        std::string new_ssid = ssid_item->valuestring;
+        cJSON* pass_item = cJSON_GetObjectItem(args, "password");
+        std::string new_pass = cJSON_IsString(pass_item) ? pass_item->valuestring : "";
+        cJSON_Delete(args);
+
+        nvs_handle_t h;
+        esp_err_t nerr = nvs_open(kWifiRemoteNvsNamespace, NVS_READWRITE, &h);
+        if (nerr != ESP_OK) {
+            return "failed|stage=wifi_set_remote error=" + std::string(esp_err_to_name(nerr));
+        }
+        if (new_ssid.empty()) {
+            // Empty ssid clears the remote override; ENOTFOUND on an already-empty
+            // slot is not an error.
+            esp_err_t e1 = nvs_erase_key(h, "ssid");
+            esp_err_t e2 = nvs_erase_key(h, "pass");
+            nerr = nvs_commit(h);
+            nvs_close(h);
+            if (nerr != ESP_OK) return "failed|stage=wifi_set_remote error=" + std::string(esp_err_to_name(nerr));
+            (void)e1; (void)e2;
+        } else {
+            nerr = nvs_set_str(h, "ssid", new_ssid.c_str());
+            if (nerr == ESP_OK) nerr = nvs_set_str(h, "pass", new_pass.c_str());
+            if (nerr == ESP_OK) nerr = nvs_commit(h);
+            nvs_close(h);
+            if (nerr != ESP_OK) return "failed|stage=wifi_set_remote error=" + std::string(esp_err_to_name(nerr));
+        }
+
+        // Apply immediately: rebuild the table (remote in slot 0 if any),
+        // start from it, and reconnect now rather than waiting for a reboot.
+        // If the new credential doesn't work, wifi_event_handler's normal
+        // 3-strikes rotation falls back to the compiled-in pair on its own.
+        wifi_load_creds();
+        s_wifi_idx = 0;
+        s_wifi_fails = 0;
+        wifi_apply_cred();
+        esp_wifi_disconnect();
+        esp_wifi_connect();
+        return new_ssid.empty() ? "done|wifi_remote_cleared"
+                                 : std::string("done|wifi_remote_saved ssid=") + new_ssid;
     }
     if (cmd.action == "far_end_stop") {
         s_farend_stop = true;
