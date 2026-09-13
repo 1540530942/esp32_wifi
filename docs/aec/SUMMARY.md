@@ -92,6 +92,39 @@
 **影响**：约 650 次交互耗尽 29 KB；`largest` 跌破 far_end 建任务所需的 4 KB 会出现
 `no_task` —— 第 5 轮已实际观察到。**常驻语音设备需要定期重启，不可接受。**
 
+#### 4.1.1 补充定位（2026-09-13，spark 上插桩，独立复现）
+
+在 `mqtt_control_client.cpp` 的 `on_command`/`command_task`/`publish_status` 里打了
+7 个 heap checkpoint（H0~H6，外加 HR0/HR1 包住 `cJSON_Parse`、HQ0/HQ1 包住整个
+`MQTT_EVENT_DATA` 事件体），连发 20~21 条 `aec_probe`，逐段 diff：
+
+| 区间 | 21 个样本的 delta | 结论 |
+|---|---|---|
+| H0→H1（`args_json`/`job` 分配 + `root` 释放） | +332~+372（净增，`root` 释放的比 `job` 分配的多） | **干净** |
+| H1→H2（xQueueSend 交给 command_task） | 0（个别噪声） | **干净** |
+| H2→H3（第一次 `publish_status("accepted")`，`message`/`stream_id` 为空） | 噪声在 -100~+20 之间跳，无固定值 | **干净**（未见稳定泄漏） |
+| **H4→H5（第二次 `publish_status(status, message, ...)`，`message` 是真实探测结果字符串）** | **-44，21/21 样本零方差** | **就是这里** |
+| H5→H6（`delete job`） | +104~+284（正常回收） | 干净 |
+
+**已排除的候选**：
+- `job`/`args_json`/`root` 的 `new`/`delete`、`cJSON_Parse`/`cJSON_Delete` 全部严格配对，
+  多次独立验证无残留。
+- `pending_status_`（MQTT 离线时的重试 map）——直接加了
+  `pubdbg mid=%d pending_sz=%u` 日志，10 次调用 `message_id` 全为正数（发布成功）、
+  `pending_status_.size()` 全程为 0，**这个"离线补发"分支在测试中从未触发过**，
+  排除。
+
+**仍未确认的最后一层**：这 -44 B 目前无法进一步区分"`esp_mqtt_client_publish()`
+本身在成功发布后仍有固定大小的内部记账没释放（QoS1 outbox 的链表节点一类，
+esp-mqtt 是 vendored 组件，非我们自己代码）"，还是"这条 done 消息内容
+（`json_len` 始终 169 字节，因为 `aec_probe` 的探测结果格式固定）恰好每次
+都一样大，掩盖了一个跟内容长度成正比的泄漏"——因为测试中一直是同一个命令、
+同一探测结果格式，`message` 长度从未变化过，无法靠现有数据区分这两种可能。
+
+**下一步**（如果要继续查，而不是先转做规避）：找一个 `message` 长度会变化的
+真实命令重复本实验，看 -44 是否仍然固定；如果固定，则确认是 esp-mqtt 内部
+问题，需要读 esp-mqtt 源码里 QoS1 发布后 outbox 条目的释放路径。
+
 ### 4.2 打断延迟 400 ms（门槛 300 ms）
 
 **不是缺陷，是门槛定得比硬件能力激进**：

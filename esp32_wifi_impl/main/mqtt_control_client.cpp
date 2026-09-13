@@ -2,6 +2,7 @@
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +10,18 @@
 #include <utility>
 
 static const char* TAG = "mqtt_control";
+
+// TEMP diagnostic instrumentation for the 45B/command internal-heap leak
+// tracked in docs/aec/SUMMARY.md section 4.1. Brackets the three suspects
+// (on_command's payload->HubCommand string work, the MqttCommandJob queue
+// item, and publish_status) so a run of N no-op commands (e.g. aec_probe)
+// shows which segment's delta accumulates ~45B/command. Remove once the
+// leak is found and fixed.
+static inline uint32_t heap_now() {
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+}
+#define HEAP_MARK(point, cmd_id) \
+    ESP_LOGI(TAG, "heapmark %s heap=%u id=%s", (point), (unsigned)heap_now(), (cmd_id))
 
 struct MqttCommandJob {
     MqttControlClient* owner;
@@ -113,6 +126,7 @@ void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
         flush_pending_status();
         break;
     case MQTT_EVENT_DATA: {
+        HEAP_MARK("HQ0_event_data_entry", "-");
         const bool first = event->current_data_offset == 0;
         if (first) incoming_payload_.clear();
         if (event->data && event->data_len > 0) {
@@ -121,6 +135,7 @@ void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
         if (event->current_data_offset + event->data_len >= event->total_data_len) {
             on_command(incoming_payload_);
             incoming_payload_.clear();
+            HEAP_MARK("HQ1_after_oncommand_and_clear", "-");
         }
         break;
     }
@@ -149,12 +164,14 @@ void MqttControlClient::on_event(esp_mqtt_event_handle_t event) {
 }
 
 void MqttControlClient::on_command(const std::string& payload) {
+    HEAP_MARK("HR0_true_entry", "-");
     if (payload.empty() || payload.find_first_not_of(" \t\r\n") == std::string::npos) {
         // MQTT retained-topic cleanup is represented by an empty retained
         // payload; it is not a device command.
         return;
     }
     cJSON* root = cJSON_Parse(payload.c_str());
+    HEAP_MARK("HR1_after_cjson_parse", "-");
     if (!root) {
         ESP_LOGW(TAG, "invalid command JSON");
         return;
@@ -171,6 +188,7 @@ void MqttControlClient::on_command(const std::string& payload) {
         return;
     }
     const std::string command_id = id->valuestring;
+    HEAP_MARK("H0_on_command_entry", command_id.c_str());
     if (!mark_command_seen(command_id)) {
         ESP_LOGW(TAG, "duplicate command ignored id=%s", command_id.c_str());
         cJSON_Delete(root);
@@ -185,6 +203,7 @@ void MqttControlClient::on_command(const std::string& payload) {
     };
     cJSON_free(args_json);
     cJSON_Delete(root);
+    HEAP_MARK("H1_after_job_built", command_id.c_str());
     if (!job_queue_ || xQueueSend(job_queue_, &job, 0) != pdTRUE) {
         publish_status(job->command.id, "failed", "command queue full");
         delete job;
@@ -205,7 +224,10 @@ void MqttControlClient::command_task(void* arg) {
         MqttCommandJob* job = nullptr;
         if (xQueueReceive(self->job_queue_, &job, portMAX_DELAY) != pdTRUE || !job) continue;
         MqttControlClient* owner = job->owner ? job->owner : self;
+        const char* cid = job->command.id.c_str();
+        HEAP_MARK("H2_task_dequeued", cid);
         owner->publish_status(job->command.id, "accepted", {}, job->command.action);
+        HEAP_MARK("H3_after_accepted_publish", cid);
         const std::string result = owner->command_handler_
             ? owner->command_handler_(job->command) : "unsupported";
         const size_t separator = result.find('|');
@@ -218,8 +240,12 @@ void MqttControlClient::command_task(void* arg) {
             if (cJSON_IsString(item)) stream_id = item->valuestring;
             cJSON_Delete(args);
         }
+        HEAP_MARK("H4_after_handler", cid);
         owner->publish_status(job->command.id, status, message, job->command.action, stream_id);
+        HEAP_MARK("H5_after_final_publish", cid);
+        const std::string cid_copy = job->command.id;  // job dies next line; cid would dangle
         delete job;
+        HEAP_MARK("H6_after_delete_job", cid_copy.c_str());
     }
 }
 
@@ -253,6 +279,9 @@ void MqttControlClient::publish_status(const std::string& command_id,
         } else {
             pending_status_.erase(command_id);
         }
+        ESP_LOGI(TAG, "pubdbg mid=%d pending_sz=%u msg_len=%u json_len=%u status=%s",
+                 message_id, (unsigned)pending_status_.size(), (unsigned)message.size(),
+                 (unsigned)strlen(json), status.c_str());
         cJSON_free(json);
     }
     cJSON_Delete(root);
