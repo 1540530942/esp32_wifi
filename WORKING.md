@@ -34,3 +34,9 @@
    - 参考格式见 `docs/logs/2026-09-13-multiturn-dialogue-audio-prep.md`。
 
 ## 正在做的事（用完记得删）
+
+- Claude：排查通用 `/api/device/{id}/command` 入口下发 `play_audio` 卡在 `dispatched`
+  的问题，并在 `cloud/device_hub/server.py` 加一个新 action `play_lan_audio`
+  （params.name→拼 `CONFIG_LOCAL_AUDIO_BASE_URL` 播放局域网音频，
+  settings_override.voice_volume_percent→现有 volume 参数）。涉及文件：
+  `cloud/device_hub/server.py`（可能还有 `static/device.html`）。
