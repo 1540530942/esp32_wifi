@@ -165,6 +165,23 @@ static void box_enable_output(AudioCodec* codec, bool enable) {
     codec->output_enabled = enable;
 }
 
+int BoxAudioCodec_ReadInputReg(AudioCodec* codec, int reg, uint8_t* value) {
+    if (codec == NULL || value == NULL) {
+        return -1;
+    }
+    BoxAudioCodec* box = box_cast(codec);
+    if (box->in_ctrl_if == NULL || box->in_ctrl_if->read_reg == NULL) {
+        return -1;
+    }
+    uint8_t raw = 0;
+    int ret = box->in_ctrl_if->read_reg(box->in_ctrl_if, reg, 1, &raw, 1);
+    if (ret != 0) {
+        return ret;
+    }
+    *value = raw;
+    return 0;
+}
+
 static void box_destroy(AudioCodec* codec) {
     BoxAudioCodec* box = box_cast(codec);
     ESP_ERROR_CHECK(esp_codec_dev_close(box->output_dev));

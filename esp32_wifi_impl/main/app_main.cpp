@@ -10,6 +10,7 @@ extern "C" {
 #include "playback.h"
 #include "ws_client.h"
 #include "afe_pipeline.h"
+#include "audio/codecs/box_audio_codec.h"
 }
 
 #include "driver/gpio.h"
@@ -85,6 +86,41 @@ static void persist_volume() {
     nvs_close(handle);
     if (err != ESP_OK) ESP_LOGW(TAG, "failed to persist volume=%d: %s", s_volume,
                                 esp_err_to_name(err));
+}
+
+// ES7210 per-channel PGA gain lives in the low nibble of REG43 (MIC1 -> ch0,
+// the microphone) and REG44 (MIC2 -> ch1, the hardware AEC reference). Index
+// 0..11 is 3 dB per step; 12..14 are the three fine steps above 33 dB. Bit
+// 0x10 is the channel's own enable/unmute bit.
+static float es7210_gain_index_to_db(uint8_t reg) {
+    const uint8_t idx = reg & 0x0f;
+    if (idx <= 11) return idx * 3.0f;
+    if (idx == 12) return 34.5f;
+    if (idx == 13) return 36.0f;
+    return 37.5f;
+}
+
+// Reads the two PGA gain registers and formats them for both the boot log and
+// the es7210_regs command. The reference channel's gain is never written
+// explicitly (esp_codec_dev_open() applies the handle default to every
+// channel, then box_enable_input() raises ch0 alone), so this is the only way
+// to know what the AEC reference is actually running at rather than inferring
+// it from the driver source.
+static std::string read_es7210_gain_regs(AudioPlayer* player) {
+    if (player == nullptr || player->codec() == nullptr) return "failed|no codec";
+    uint8_t reg43 = 0, reg44 = 0;
+    const int r43 = BoxAudioCodec_ReadInputReg(player->codec(), 0x43, &reg43);
+    const int r44 = BoxAudioCodec_ReadInputReg(player->codec(), 0x44, &reg44);
+    if (r43 != 0 || r44 != 0) {
+        return "failed|i2c read err r43=" + std::to_string(r43) + " r44=" + std::to_string(r44);
+    }
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "REG43=0x%02X (ch0 mic gain=%.1fdB, enable=%d) "
+             "REG44=0x%02X (ch1 ref gain=%.1fdB, enable=%d)",
+             reg43, es7210_gain_index_to_db(reg43), (reg43 & 0x10) ? 1 : 0,
+             reg44, es7210_gain_index_to_db(reg44), (reg44 & 0x10) ? 1 : 0);
+    return std::string(buf);
 }
 
 static bool is_local_audio_url(const char* url) {
@@ -799,6 +835,13 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         afe_config_summary(sum, sizeof(sum));
         return std::string("done|") + sum;
     }
+    if (cmd.action == "es7210_regs") {
+        // Read-only I2C register read; safe while audio is running, so no
+        // is_playing() guard -- the point is to be able to check the AEC
+        // reference gain mid-experiment without stopping playback.
+        const std::string regs = read_es7210_gain_regs(player);
+        return regs.rfind("failed", 0) == 0 ? regs : "done|" + regs;
+    }
     if (cmd.action == "aec_probe") {
         if (player->is_playing()) return "failed|busy";
         esp_err_t err = player->run_aec_reference_probe();
@@ -1075,6 +1118,9 @@ extern "C" void app_main() {
     } else {
         ESP_LOGE(TAG, "AEC pipeline init failed; continuing half-duplex");
     }
+    // Read after the AFE path is up, so this reports the gains the AEC is
+    // actually running with rather than an intermediate init state.
+    ESP_LOGI(TAG, "ES7210 PGA: %s", read_es7210_gain_regs(&audio_player).c_str());
     DeviceHubClient hub(
         CONFIG_DEVICE_HUB_BASE_URL,
         CONFIG_DEVICE_ID,
