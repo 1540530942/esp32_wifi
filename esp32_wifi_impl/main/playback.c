@@ -215,8 +215,16 @@ static void playback_discard_queue(void)
     s_killed = true;                 // stops play_pcm mid-block and drops future chunks
     wav_chunk_t c;
     while (xQueueReceive(s_queue, &c, 0) == pdTRUE) free(c.data);
-    report_state(false);
-    board_pa_enable(false);
+    // The amp and the "stopped" report are shared with anything else driving
+    // the speaker, so only touch them when nothing else is playing. Cutting the
+    // amp under an active external player doesn't just silence it: with the
+    // output disabled the codec stops applying backpressure, so its write loop
+    // races through the whole clip into nowhere and then reports success --
+    // measured as a 37.92s file "finishing" in 7421ms with PA GPIO17=0.
+    if (!s_external_active) {
+        report_state(false);
+        board_pa_enable(false);
+    }
 }
 
 void playback_kill(void)
