@@ -108,9 +108,15 @@ static void handle_text(const char *data, size_t len)
     } else if (strcmp(t, "tts_begin") == 0) {
         playback_begin_turn();
     } else if (strcmp(t, "tts_cancel") == 0 || strcmp(t, "speech_start") == 0) {
-        // Hard barge-in confirmation from the cloud.
-        ESP_LOGI(TAG, "%s -> kill playback", t);
-        playback_kill();
+        // Cloud-side barge-in signal: drop the TTS stream it is sending us.
+        // Deliberately does NOT stop an external player -- the cloud has no
+        // idea a local play_audio is running, and speech_start in particular
+        // is emitted on every VAD onset, including ones that fire on residual
+        // echo. Stopping local playback is the local detector's job: it sees
+        // the actual acoustic situation and is the only path fast enough for
+        // the <200ms target anyway.
+        ESP_LOGI(TAG, "%s -> drop tts stream", t);
+        playback_discard_stream();
     } else if (strcmp(t, "result") == 0) {
         const cJSON *text = cJSON_GetObjectItem(root, "text");
         const cJSON *tts  = cJSON_GetObjectItem(root, "tts_text");
@@ -141,7 +147,7 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *even
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
         s_ready = false;
-        playback_kill();
+        playback_discard_stream();   // not an interruption: don't stop local playback
         break;
     case WEBSOCKET_EVENT_DATA: {
         // Ignore control frames (ping/pong/close: op 0x8/0x9/0xA).

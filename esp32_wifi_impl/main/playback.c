@@ -210,17 +210,33 @@ void playback_set_external_stop_cb(playback_external_stop_cb_t cb)
     s_external_stop_cb = cb;
 }
 
-void playback_kill(void)
+static void playback_discard_queue(void)
 {
     s_killed = true;                 // stops play_pcm mid-block and drops future chunks
     wav_chunk_t c;
     while (xQueueReceive(s_queue, &c, 0) == pdTRUE) free(c.data);
+    report_state(false);
+    board_pa_enable(false);
+}
+
+void playback_kill(void)
+{
+    playback_discard_queue();
     // Whatever is writing to the codec outside this module has to stop too --
     // otherwise a barge-in silences the TTS queue while the robot keeps talking
     // through AudioPlayer, which is the path play_audio / play_lan_audio use.
     if (s_external_stop_cb) s_external_stop_cb();
-    report_state(false);
-    board_pa_enable(false);
+}
+
+void playback_discard_stream(void)
+{
+    // Everything the cloud can tell us about -- a cancelled turn, a VAD onset,
+    // a dropped socket -- concerns the TTS stream it is sending, and nothing
+    // else. Drop those chunks; leave other players alone. Measured why this
+    // matters: with the WS teardown wired to the full kill, two of five clips
+    // in an E5 run were truncated, each immediately after a "ws error ->
+    // disconnected" and with no barge-in anywhere in the log.
+    playback_discard_queue();
 }
 
 bool playback_is_playing(void)

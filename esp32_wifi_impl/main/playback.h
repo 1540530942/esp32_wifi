@@ -52,8 +52,15 @@ void playback_unduck(void);
 void playback_barge_in(void);
 
 // Barge-in level 2: drop queued + current audio immediately, discard until the
-// next playback_begin_turn().
+// next playback_begin_turn(), and stop any registered external player. Use this
+// only for an actual interruption.
 void playback_kill(void);
+
+// Connection teardown: same queue cleanup, but leaves external playback alone.
+// A dropped WebSocket means the TTS stream is gone, not that the user
+// interrupted -- truncating an unrelated local play_audio on a network blip is
+// a real failure mode, not a hypothetical one.
+void playback_discard_stream(void);
 
 // True while a chunk is playing or chunks are queued.
 bool playback_is_playing(void);
