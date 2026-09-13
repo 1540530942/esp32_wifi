@@ -279,7 +279,24 @@ esp_err_t DeviceHubClient::process_commands(const std::string& response) {
             cJSON_free(args_s);
             ESP_LOGI(TAG, "command: %s id=%s", cmd.action.c_str(), cmd.id.c_str());
             std::string status = command_handler_ ? command_handler_(cmd) : "unsupported";
-            const esp_err_t ack_err = acknowledge(cmd, status, nullptr);
+            // The platform's /ack caps status at 20 chars (it only ever stores
+            // done | failed | unsupported) and gives message 500. Handlers
+            // return their detail inline as "done|k=v ...", so anything with a
+            // real result -- aec_probe, mic_asr_test, stream_prepare's
+            // playback_done, es7210_regs -- used to blow past that limit, get
+            // rejected 422, and leave the command pinned at "dispatched" on the
+            // server with the result visible only in the trace logged below.
+            // Split on the first '|' so the detail rides in message instead.
+            std::string ack_status = status;
+            std::string ack_message;
+            const size_t bar = status.find('|');
+            if (bar != std::string::npos) {
+                ack_status = status.substr(0, bar);
+                ack_message = status.substr(bar + 1);
+                if (ack_message.size() > 500) ack_message.resize(500);
+            }
+            const esp_err_t ack_err = acknowledge(cmd, ack_status,
+                                                  ack_message.empty() ? nullptr : ack_message.c_str());
             std::string trace = "command_id=" + cmd.id + " action=" + cmd.action +
                                 " status=" + status + " ack=" + esp_err_to_name(ack_err);
             if (!cmd.text.empty()) trace += " text=" + cmd.text;
