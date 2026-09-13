@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <cstdint>
 #include <atomic>
 #include <string>
@@ -18,7 +19,7 @@ public:
                            int pa_level = 1);
     esp_err_t stop();
     AudioCodec* codec() const { return codec_; }
-    bool is_playing() const { return task_ != nullptr; }
+    bool is_playing() const { return busy_.load(); }
     esp_err_t last_result() const { return last_result_; }
     const std::string& last_error() const { return last_error_; }
     size_t last_pcm_bytes() const { return last_pcm_bytes_.load(); }
@@ -66,7 +67,18 @@ private:
                                         int pa_level);
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     AudioCodec* codec_ = nullptr;
+    // Created once in the constructor and never torn down: play_wav_url() /
+    // play_pcm_url() used to xTaskCreate a fresh 8 KB-stack task per call,
+    // which failed with ESP_ERR_NO_MEM whenever internal RAM happened to be
+    // fragmented below ~8 KB contiguous at that instant (this device runs
+    // AFE full-duplex continuously, so that baseline is chronically tight --
+    // see docs/aec/SUMMARY.md). A persistent task sidesteps the failure mode
+    // entirely: the 8 KB stack is claimed once, at boot, when fragmentation
+    // is lowest, and every later call just wakes it via a semaphore instead
+    // of allocating anything.
     TaskHandle_t task_ = nullptr;
+    SemaphoreHandle_t request_sem_ = nullptr;
+    std::atomic<bool> busy_{false};
     volatile bool stop_requested_ = false;
     volatile esp_err_t last_result_ = ESP_OK;
     std::string pending_url_;

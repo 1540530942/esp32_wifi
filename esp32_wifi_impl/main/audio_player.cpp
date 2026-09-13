@@ -46,6 +46,11 @@ AudioPlayer::AudioPlayer() {
     AudioCodec_SetOutputVolume(codec_, 30);
     AudioCodec_Start(codec_);
     AudioCodec_EnableOutput(codec_, false);
+    request_sem_ = xSemaphoreCreateBinary();
+    if (!request_sem_ || xTaskCreate(&AudioPlayer::task_entry, "audio_play", 8192, this, 5,
+                                      &task_) != pdPASS) {
+        ESP_LOGE(TAG, "failed to start persistent audio_play task");
+    }
     ESP_LOGI(TAG, "ES7210/ES8311 audio path ready, output volume=30%%, PA GPIO17=%d",
              gpio_get_level(AUDIO_CODEC_PA_PIN));
 }
@@ -60,43 +65,55 @@ AudioPlayer::~AudioPlayer() {
 }
 
 esp_err_t AudioPlayer::play_wav_url(const std::string& url, uint8_t volume_percent) {
-    if (!codec_) return ESP_ERR_INVALID_STATE;
-    if (task_) return ESP_ERR_INVALID_STATE;
+    if (!codec_ || !request_sem_) return ESP_ERR_INVALID_STATE;
+    bool expected = false;
+    if (!busy_.compare_exchange_strong(expected, true)) return ESP_ERR_INVALID_STATE;
     const bool https = url.rfind("https://", 0) == 0;
     const bool http = url.rfind("http://", 0) == 0;
-    if (!https && !http) return ESP_ERR_INVALID_ARG;
+    if (!https && !http) { busy_ = false; return ESP_ERR_INVALID_ARG; }
     pending_url_ = url;
     pending_volume_ = std::min<uint8_t>(volume_percent, 100);
     pending_pcm_ = false;
     pending_pa_level_ = 1;
     stop_requested_ = false;
     last_result_ = ESP_ERR_INVALID_STATE;
-    return xTaskCreate(&AudioPlayer::task_entry, "audio_play", 8192, this, 5, &task_) == pdPASS
-               ? ESP_OK : ESP_ERR_NO_MEM;
+    xSemaphoreGive(request_sem_);
+    return ESP_OK;
 }
 
 esp_err_t AudioPlayer::play_pcm_url(const std::string& url, uint8_t volume_percent, int pa_level) {
-    if (!codec_) return ESP_ERR_INVALID_STATE;
-    if (task_) return ESP_ERR_INVALID_STATE;
-    if (url.rfind("wss://", 0) != 0 && url.rfind("ws://", 0) != 0) return ESP_ERR_INVALID_ARG;
+    if (!codec_ || !request_sem_) return ESP_ERR_INVALID_STATE;
+    bool expected = false;
+    if (!busy_.compare_exchange_strong(expected, true)) return ESP_ERR_INVALID_STATE;
+    if (url.rfind("wss://", 0) != 0 && url.rfind("ws://", 0) != 0) {
+        busy_ = false;
+        return ESP_ERR_INVALID_ARG;
+    }
     pending_url_ = url;
     pending_volume_ = std::min<uint8_t>(volume_percent, 100);
     pending_pcm_ = true;
     pending_pa_level_ = pa_level ? 1 : 0;
     stop_requested_ = false;
     last_result_ = ESP_ERR_INVALID_STATE;
-    return xTaskCreate(&AudioPlayer::task_entry, "audio_pcm", 8192, this, 5, &task_) == pdPASS
-               ? ESP_OK : ESP_ERR_NO_MEM;
-}
-
-esp_err_t AudioPlayer::stop() {
-    if (task_) stop_requested_ = true;
+    xSemaphoreGive(request_sem_);
     return ESP_OK;
 }
 
+esp_err_t AudioPlayer::stop() {
+    if (busy_.load()) stop_requested_ = true;
+    return ESP_OK;
+}
+
+// Persistent for the device's lifetime: blocks on request_sem_ between
+// requests, so the one-time 8 KB stack this task was created with (see the
+// constructor) is all any future play_wav_url()/play_pcm_url() call ever
+// needs -- neither can fail with ESP_ERR_NO_MEM again.
 void AudioPlayer::task_entry(void* arg) {
-    static_cast<AudioPlayer*>(arg)->play_task();
-    vTaskDelete(nullptr);
+    auto* self = static_cast<AudioPlayer*>(arg);
+    for (;;) {
+        xSemaphoreTake(self->request_sem_, portMAX_DELAY);
+        self->play_task();
+    }
 }
 
 void AudioPlayer::play_task() {
@@ -116,8 +133,8 @@ void AudioPlayer::play_task() {
     ESP_LOGI(TAG, "%s playback %s", pcm ? "PCM WebSocket" : "WAV", err == ESP_OK ? "finished" :
              (stop_requested_ ? "stopped" : "failed"));
     if (wdt_add_err == ESP_OK) esp_task_wdt_delete(nullptr);
-    task_ = nullptr;
     stop_requested_ = false;
+    busy_ = false;
 }
 
 esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
