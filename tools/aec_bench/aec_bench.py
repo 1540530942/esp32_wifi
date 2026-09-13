@@ -48,6 +48,25 @@ def send_command(action, args, wait_s=240):
     return "timeout", ""
 
 
+ACTION_API = "https://www.wangyutang.cn/action/api"
+
+
+def pi_play(name, volume=70):
+    """让树莓派播一个已预置的素材（扮演人说话）。不等它播完就返回。
+
+    这套对话素材是严格一问一答的，天然没有重叠，所以双讲和打断必须由这里人为
+    制造：先让 ESP32 开始播，再在指定时刻触发树莓派开口。
+    """
+    body = json.dumps({"action": "play_local_audio", "params": {"name": name},
+                       "settings_override": {"voice_volume_percent": volume},
+                       "source": "aec_bench"})
+    out = sh(f"curl -s -m 15 -X POST '{ACTION_API}/tasks' "
+             f"-H 'Content-Type: application/json' -d '{body}'")
+    tid = json.loads(out)["task"]["id"]
+    print(f"  [pi_play] {name} vol={volume} task={tid}")
+    return tid
+
+
 def snapshot_uploads():
     """采集前的文件名快照，用来识别本次新增的上传。"""
     out = sh(f"ssh -o ConnectTimeout=15 {TANG} \"docker exec device-hub ls /app/data/audio/\"")
@@ -161,6 +180,10 @@ def main():
     ap.add_argument("--volume", type=int, default=70)
     ap.add_argument("--url", default="", help="播放局域网素材（E2/E3），留空则播内置噪声")
     ap.add_argument("--no-play", action="store_true", help="纯录音不播放（E2b）")
+    ap.add_argument("--pi-play", default="", help="同时让树莓派播这个素材（扮演人）")
+    ap.add_argument("--pi-volume", type=int, default=70)
+    ap.add_argument("--pi-delay", type=float, default=0.0,
+                    help="树莓派开口相对采集开始的延迟秒数（E3 靠这个制造双讲重叠）")
     args = ap.parse_args()
 
     run_id = f"{args.tag}_{time.strftime('%H%M%S')}"
@@ -175,6 +198,20 @@ def main():
         cap_args["url"] = args.url
 
     before = snapshot_uploads()
+
+    # 树莓派的开口时刻由一个后台线程定时触发。这里不追求毫秒级对齐：命令经心跳
+    # 下发有 0~5s 的排队抖动，精确调度本来就做不到。做法是把采集窗口开得足够长，
+    # 事后从录音里定位人声实际落在哪儿，用内容（ASR）而不是时间戳来判读。
+    if args.pi_play:
+        import threading
+        def fire():
+            time.sleep(args.pi_delay)
+            try:
+                pi_play(args.pi_play, args.pi_volume)
+            except Exception as exc:                      # noqa: BLE001
+                print(f"  !! pi_play 失败: {exc}")
+        threading.Thread(target=fire, daemon=True).start()
+
     st, msg = send_command("aec_capture", cap_args,
                            wait_s=args.seconds + args.settle + 180)
     print(f"  capture -> {st}: {msg[:200]}")
