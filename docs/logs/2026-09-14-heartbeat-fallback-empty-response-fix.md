@@ -104,16 +104,50 @@ Caddy 反向代理在探测到客户端主动半关闭（TCP FIN）时，会提�
 "更标准的HTTP/1.0写法"把它加回去）。改动位置：
 `esp32_wifi_impl/main/device_hub_client.cpp` 的 `post_http_raw()`。
 
-## 现状（截至本篇记录）
+## 验证（已完成，真机）
 
-- **代码修复已完成，尚未编译、尚未OTA、尚未在真机上验证。**
-- 修复思路已经用独立的 Python 脚本在真实网络环境（Spark 所在局域网）针对生产
-  `110.40.154.41:80` 端点验证过，不是纸面推理。
-- 下一步：编译（走 GitHub Actions，参考 v34/v35 的流程）→ OTA 发布 → 用一条新的
-  `play_audio` 测试命令验证心跳下发命令这条路径现在能正常走通（设备真的去拉取
-  Spark 文件、播放、并回 `ack`）→ 确认后再继续实现用户要求的 `play_lan_audio`
-  这个新 action（`params.name` → 拼 `CONFIG_LOCAL_AUDIO_BASE_URL`，
-  `settings_override.voice_volume_percent` → 现有 `volume` 参数）。
-- 这个bug理论上也会让 `/register`、`/log`、`/boot_announce` 的响应处理逻辑
-  （如果以后有人给它们加上读取响应体的逻辑）踩到同一个坑，值得在修复说明里
-  留一笔，避免以后重新排查一遍同一件事。
+- **编译**：tag `ota-esp32-wangyutang-v36-heartbeat-fix`（commit `6b6c6e6`）触发
+  GitHub Actions，产物 release `rel-b29d9d24815c`，2449040 字节。
+- **OTA**：job `ota-19de7a2539da`，`v35-wifi-nvs` → `v36-heartbeat-fix`，40 秒内
+  `verified`。设备沿用 NVS 里已有的 `wifi_remote` 凭据联网，没有重演 09-13 那次
+  "通用镜像空凭据导致失联"的事故。
+- **验证1（心跳 body）**：刷完新固件后立刻抓实时串口日志，同一条日志行从
+  `heartbeat response bytes=0 body=` 变成
+  `heartbeat response bytes=50 body={"ok":true,"server_time":...,"commands":[]}`。
+- **验证2（端到端命令）**：发一条全新的 `play_audio` 测试命令
+  （`http://192.168.1.16:8080/esp32/turn02_assistant.wav`），9.2 秒内
+  `dispatched → done`；交叉核对 Spark 静态服务器的访问日志，同一时刻确实收到来自
+  `192.168.1.15` 的 GET（此前两次失败的测试命令，Spark 日志里从未出现过对应的
+  GET）。**这是通用 `/api/device/{id}/command`（心跳下发）路径第一次被证明真正
+  跑通。**
+
+## 附带发现：心跳轮询路径本身有 0~5 秒的结构性排队延迟
+
+用一次带精确串口时间戳的复测（命令 POST 发出记为 t=0）拆出完整耗时链：
+
+| 阶段 | 相对时间 | 说明 |
+|---|---|---|
+| 设备通过心跳收到命令 | **+2.006s** | 等下一次心跳轮询；契约建议间隔 5s，实际等多久取决于命令创建时机撞在心跳节奏的哪一点 |
+| 连上 Spark、建流、功放使能（真正开始出声） | **+2.506s** | 仅 0.5s：TCP 连接 91ms + 流式头解析 |
+| 播放完成 | +10.516s | 音频本身约 8.06s（turn02 实际时长 ~7.92s） |
+
+**从下发到真正开始播报 2.5 秒，其中 2 秒（80%）花在等心跳轮询上，跟音频从哪儿取
+（局域网直连 vs 走云端）完全无关。** 这个排队延迟是通用 `/command` 入口（心跳下发）
+结构性的；走 `_enqueue_mqtt_command()`（`/speak`、`/upload_audio` 用的那条）是服务端
+一发布设备立刻收到，没有这段等待。
+
+**结论**：这个 bug 修复让心跳下发这条路"能用了"，但如果目标是"快速实时播报"，
+`play_lan_audio` 应该直接走 MQTT 下发，不要用通用 `/command` 入口——两条路现在都不会
+再卡死，但 MQTT 那条在延迟上限上有结构性优势。（后续 `play_lan_audio` 已按此实现，
+见 `2026-09-14-device-hub-fork-merge.md`。）
+
+## 遗留
+
+- 这个 bug 理论上也会让 `/register`、`/log`、`/boot_announce` 的响应处理逻辑
+  （如果以后有人给它们加上读取响应体的逻辑）踩到同一个坑，值得留一笔，避免以后
+  重新排查一遍同一件事。
+- **本次修复顺带把一个竞态从"不可达"变成了"可达"**：在心跳回执恒为空的年代，
+  "心跳抢先把 pending 命令标成 dispatched 并投递、设备执行并 ACK、随后 MQTT 发布
+  完成又把终态覆盖回 dispatched"这条路径走不通；修好之后它走得通了。本仓库
+  `cloud/device_hub/server.py` 里的 `"dispatching"` 占位模式正是防这个的，生产版
+  当时还没有——这也是合并时选择保留本仓库这套模式的直接理由。
