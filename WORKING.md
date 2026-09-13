@@ -32,6 +32,10 @@
    - `AEC_INTEGRATION_LOG.md` 是历史遗留的单文件英文工程日志（L0-L6 验收那条线），
      只在续写那条主线时追加，不要把新话题也塞进去。
    - 参考格式见 `docs/logs/2026-09-13-multiturn-dialogue-audio-prep.md`。
+7. **固件部署/恢复顺序固定为 OTA → Spark USB → WSL USB**：先尝试已登记且可验证的
+   OTA；OTA 不可用时优先使用 Spark 上的 USB 调试/烧录链路；只有 Spark 不可用时才切换
+   到 WSL 的 usbipd USB 链路。USB 恢复默认只写活动 app 分区并保留 NVS，整片擦除或
+   重写 bootloader/分区表必须有明确授权。
 
 ## 正在做的事（用完记得删）
 

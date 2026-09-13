@@ -20,6 +20,21 @@ GitHub commit/tag
   -> job verified
 ```
 
+## 部署与恢复优先级
+
+现场固定按以下顺序处理固件升级和故障恢复：
+
+1. **OTA**：设备在线且 MQTT/心跳正常时，优先使用已登记的 OTA release 创建 OTA job，
+   直到设备重新上线并将 job 标记为 `verified`。
+2. **Spark USB**：OTA 无法使用、设备仍可通过物理 USB 连接时，优先在 Spark 上通过
+   `/dev/ttyACM0` 使用 esptool/ESP-IDF 调试和烧录。Spark 是首选有线恢复主机。
+3. **WSL USB**：仅当 Spark 不可用时，才使用 Windows `usbipd` 转发到 WSL 的
+   `/dev/ttyACM0` 进行调试和烧录。
+
+USB 恢复默认只写目标 app 分区，保留 NVS 中的 Wi-Fi、音量和设备身份；不得因为普通固件
+升级而整片擦除。只有明确需要修复 bootloader、分区表或 NVS 损坏时，才扩大写入范围，
+并在操作记录中说明原因和备份/恢复措施。
+
 每次发布记录版本、Git commit、Actions URL、大小和 SHA256。每次 OTA 任务记录设备、旧版本、
 目标版本、command_id、下载进度、离线/重启、重新上线、验证结果和错误信息。审计记录保存在
 device_hub 数据卷中的 `ota_audit.jsonl`。

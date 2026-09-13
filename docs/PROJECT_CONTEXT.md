@@ -7,6 +7,8 @@
 - ESP32 固件：`esp32_wifi_impl/`
 - 云端设备控制面：`cloud/device_hub/`
 - OTA 发布与现场操作：[`OTA_RELEASE.md`](OTA_RELEASE.md)
+- 固件部署/恢复优先级：OTA → Spark USB → WSL USB；具体判定和安全边界见
+  [`OTA_RELEASE.md`](OTA_RELEASE.md)“部署与恢复优先级”。
 - 完整历史联调与排障证据：[`history/`](history/)
 
 ## 延续工作前的注意事项
