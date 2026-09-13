@@ -449,6 +449,19 @@ static void aec_on_tts_state(bool playing) {
     ws_client_report_tts_state(playing);
 }
 
+// Barge-in reaches AudioPlayer through here. playback.c can only duck its own
+// TTS chunk queue; everything the robot says through play_audio /
+// play_lan_audio / speak_pcm is written to the codec by AudioPlayer instead, so
+// without this hook an interruption silences an empty queue while the robot
+// keeps talking. stop() flips stop_requested_, which the streaming loops check
+// per block -- so playback ends within one write block, not at the end of the
+// buffered clip.
+static void aec_stop_external_playback(void) {
+    if (s_audio_player != nullptr && s_audio_player->is_playing()) {
+        s_audio_player->stop();
+    }
+}
+
 // --- continuous far end ----------------------------------------------------
 // aec_capture drives playback itself, so the echo only exists while a capture
 // runs. That is fine for a single window, but it cannot produce the case the
@@ -1118,6 +1131,7 @@ extern "C" void app_main() {
     } else {
         ESP_LOGE(TAG, "AEC pipeline init failed; continuing half-duplex");
     }
+    playback_set_external_stop_cb(aec_stop_external_playback);
     // Read after the AFE path is up, so this reports the gains the AEC is
     // actually running with rather than an intermediate init state.
     ESP_LOGI(TAG, "ES7210 PGA: %s", read_es7210_gain_regs(&audio_player).c_str());

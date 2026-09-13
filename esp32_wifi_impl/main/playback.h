@@ -35,8 +35,21 @@ int playback_gain_pct(void);
 // turn clock that the onset grace is measured against.
 void playback_set_external_active(bool active);
 
+// Barge-in must be able to stop audio this module did not queue. Ducking only
+// scales this module's own output gain, which does nothing to a player that
+// writes to the codec itself -- AudioPlayer (every play_audio / play_lan_audio
+// / speak_pcm the robot performs) and the far_end fixture both do. Register a
+// stop callback and the barge-in paths will invoke it alongside their own
+// duck/kill, so an interruption reaches whatever is actually making sound.
+typedef void (*playback_external_stop_cb_t)(void);
+void playback_set_external_stop_cb(playback_external_stop_cb_t cb);
+
 void playback_duck(void);
 void playback_unduck(void);
+
+// What the local (level-1) barge-in detector should call: ducks this module's
+// own queue and stops any registered external player in one go.
+void playback_barge_in(void);
 
 // Barge-in level 2: drop queued + current audio immediately, discard until the
 // next playback_begin_turn().

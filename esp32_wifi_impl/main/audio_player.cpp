@@ -1,5 +1,11 @@
 #include "audio_player.h"
 
+// playback.h has no extern "C" guard of its own, so wrap it here -- without
+// this the C++ compiler mangles the names and the link fails.
+extern "C" {
+#include "playback.h"
+}
+
 #include "audio/codecs/box_audio_codec.h"
 #include "audio_board_config.h"
 #include "esp_crt_bundle.h"
@@ -121,6 +127,14 @@ void AudioPlayer::play_task() {
     const uint8_t volume = pending_volume_;
     const bool pcm = pending_pcm_;
     const int pa_level = pending_pa_level_;
+    // Tell the AFE barge-in detector the speaker is busy. It gates on
+    // playback_is_playing(), which only tracks the TTS chunk queue in
+    // playback.c -- this player writes to the codec directly, so without this
+    // the detector never evaluates while the robot is speaking through
+    // play_audio / play_lan_audio / speak_pcm, and the user cannot interrupt it
+    // at all. Also restarts the onset-grace clock so the first moments of this
+    // utterance (before the AEC filter reconverges) don't self-trigger.
+    playback_set_external_active(true);
     const esp_err_t wdt_add_err = pcm ? ESP_ERR_INVALID_STATE : esp_task_wdt_add(nullptr);
     if (wdt_add_err != ESP_OK && wdt_add_err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "audio task watchdog registration failed: %s",
@@ -133,6 +147,7 @@ void AudioPlayer::play_task() {
     ESP_LOGI(TAG, "%s playback %s", pcm ? "PCM WebSocket" : "WAV", err == ESP_OK ? "finished" :
              (stop_requested_ ? "stopped" : "failed"));
     if (wdt_add_err == ESP_OK) esp_task_wdt_delete(nullptr);
+    playback_set_external_active(false);
     stop_requested_ = false;
     busy_ = false;
 }

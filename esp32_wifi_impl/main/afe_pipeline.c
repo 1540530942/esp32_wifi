@@ -176,8 +176,11 @@ static void fetch_task(void *arg)
         bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
         if (playing && past_grace && res->vad_state == VAD_SPEECH) {
             if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked) {
-                ESP_LOGI(TAG, "local barge-in -> duck");
-                playback_duck();
+                // Timestamp in the device's own clock so barge-in latency can be
+                // measured without cross-device sync (E4).
+                ESP_LOGI(TAG, "local barge-in -> duck+stop at t=%lld us",
+                         (long long)esp_timer_get_time());
+                playback_barge_in();
                 ducked = true;
             }
         } else {

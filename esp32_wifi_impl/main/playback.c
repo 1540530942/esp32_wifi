@@ -28,6 +28,7 @@ static volatile int64_t s_turn_start_us;
 static volatile bool s_external_active;
 static playback_state_cb_t s_state_cb;
 static volatile bool s_last_reported_playing;
+static playback_external_stop_cb_t s_external_stop_cb;
 
 // ---------------------------------------------------------------------------
 // WAV parsing + linear resample to 16 kHz mono int16
@@ -193,11 +194,31 @@ int  playback_gain_pct(void) { return s_gain_pct; }
 void playback_duck(void)   { s_gain_pct = CONFIG_AEC_DUCK_VOLUME_PCT; }
 void playback_unduck(void) { s_gain_pct = 100; }
 
+void playback_barge_in(void)
+{
+    playback_duck();                 // level 1 for this module's own TTS queue
+    // An external player writes to the codec itself and has no gain hook, so
+    // ducking cannot touch it -- stopping is the only action available. That
+    // asymmetry is deliberate: a false trigger costs a ducked TTS sentence but
+    // a cut-off play_audio, which is why the onset grace and the sustained
+    // speech-frame count matter more on this path than they do for the queue.
+    if (s_external_stop_cb) s_external_stop_cb();
+}
+
+void playback_set_external_stop_cb(playback_external_stop_cb_t cb)
+{
+    s_external_stop_cb = cb;
+}
+
 void playback_kill(void)
 {
     s_killed = true;                 // stops play_pcm mid-block and drops future chunks
     wav_chunk_t c;
     while (xQueueReceive(s_queue, &c, 0) == pdTRUE) free(c.data);
+    // Whatever is writing to the codec outside this module has to stop too --
+    // otherwise a barge-in silences the TTS queue while the robot keeps talking
+    // through AudioPlayer, which is the path play_audio / play_lan_audio use.
+    if (s_external_stop_cb) s_external_stop_cb();
     report_state(false);
     board_pa_enable(false);
 }
