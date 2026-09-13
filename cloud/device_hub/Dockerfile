@@ -13,6 +13,7 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then python -m pip config set global.index-url "
     && pip install --no-cache-dir -r requirements.txt
 
 COPY server.py ./server.py
+COPY ota_manager.py ./ota_manager.py
 COPY static ./static
 
 RUN mkdir -p /app/data
