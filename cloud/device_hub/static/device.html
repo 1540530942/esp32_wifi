@@ -22,6 +22,7 @@
         <div class="tabs">
           <button class="tab active" data-tab="text">文本播报</button>
           <button class="tab" data-tab="upload">上传音频</button>
+          <button class="tab" data-tab="lan">局域网素材</button>
         </div>
         <div class="tab-body" id="tab-text">
           <textarea id="speak-text" rows="3" placeholder="输入要播报的文字，平台自动生成语音下发给设备…"></textarea>
@@ -46,8 +47,22 @@
             <button class="btn" id="btn-stop-upload">停止播报</button>
           </div>
         </div>
+        <div class="tab-body hidden" id="tab-lan">
+          <p class="lead" style="font-size:0.82rem;margin-bottom:8px">
+            播放已预置在 Spark 局域网静态服务器上的素材，MQTT 立即下发，不经过心跳轮询。
+          </p>
+          <div class="actions">
+            <button class="btn lan-audio-btn" data-name="turn02_assistant.wav">turn02 · 开场白</button>
+            <button class="btn lan-audio-btn" data-name="turn04_assistant.wav">turn04 · 桃花源记</button>
+            <button class="btn lan-audio-btn" data-name="turn06_assistant.wav">turn06 · 饮酒·其五</button>
+            <button class="btn lan-audio-btn" data-name="turn08_assistant.wav">turn08 · 破阵子</button>
+            <button class="btn lan-audio-btn" data-name="turn10_assistant.wav">turn10 · 望庐山瀑布</button>
+            <button class="btn" id="btn-stop-lan">停止播报</button>
+          </div>
+        </div>
         <p class="lead" style="margin-top:12px;font-size:0.82rem">
-          指令入队后设备在下次心跳（≤5s）取回执行，结果回执见下方指令历史。
+          指令入队后设备在下次心跳（≤5s）取回执行，结果回执见下方指令历史。局域网素材走
+          MQTT，通常几百毫秒内送达。
         </p>
       </section>
 
@@ -339,8 +354,31 @@
         btn.disabled = false; btn.textContent = "上传并播报";
       });
 
+      // 局域网素材：直接 MQTT 下发 play_lan_audio，不走 /command（心跳轮询）
+      document.querySelectorAll(".lan-audio-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const name = btn.dataset.name;
+          const originalText = btn.textContent;
+          btn.disabled = true; btn.textContent = "下发中…";
+          try {
+            const r = await fetch(API + "/device/" + encodeURIComponent(id) + "/play_lan_audio", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                params: { name },
+                settings_override: { voice_volume_percent: selectedVolume },
+              }),
+            });
+            const j = await r.json();
+            if (r.ok && j.ok) { toast("已下发 " + name + "（" + j.transport + "，音量 " + selectedVolume + "%）"); load(); }
+            else toast("下发失败：" + apiError(j, r.status));
+          } catch (e) { toast("下发失败：" + e.message); }
+          btn.disabled = false; btn.textContent = originalText;
+        });
+      });
+
       // 停止播报
-      ["btn-stop-text", "btn-stop-upload"].forEach(bid => {
+      ["btn-stop-text", "btn-stop-upload", "btn-stop-lan"].forEach(bid => {
         document.getElementById(bid).addEventListener("click", () => sendCommand("stop_audio", {}));
       });
 
