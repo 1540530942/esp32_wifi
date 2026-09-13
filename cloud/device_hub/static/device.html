@@ -62,6 +62,10 @@
             <button class="btn lan-audio-btn" data-name="turn10_assistant.wav">turn10 · 望庐山瀑布</button>
             <button class="btn" id="btn-stop-lan">停止播报</button>
           </div>
+          <details style="margin-top:10px">
+            <summary style="cursor:pointer;font-size:0.8rem;color:var(--muted)">接口详情（curl 示例，随音量滑块实时更新）</summary>
+            <pre id="lan-audio-api-example" style="font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:0.76rem;background:rgba(16,33,29,0.05);border-radius:8px;padding:10px;margin-top:6px;white-space:pre-wrap;word-break:break-all"></pre>
+          </details>
         </div>
         <p class="lead" style="margin-top:12px;font-size:0.82rem">
           指令入队后设备在下次心跳（≤5s）取回执行，结果回执见下方指令历史。局域网素材走
@@ -288,10 +292,26 @@
         volumeRange.value = selectedVolume;
         volumeValue.textContent = selectedVolume + "%";
         localStorage.setItem("device-volume-" + id, String(selectedVolume));
+        updateLanAudioApiExample();
       }
       volumeRange.addEventListener("input", () => updateVolumeUi(Number(volumeRange.value)));
       document.getElementById("volume-down").addEventListener("click", () => updateVolumeUi(selectedVolume - 5));
       document.getElementById("volume-up").addEventListener("click", () => updateVolumeUi(selectedVolume + 5));
+
+      // 局域网素材：把实际调用的接口原样显示出来，方便照抄去脚本化，也方便核对
+      // 网页按钮和 curl 调用是不是同一条路径。
+      function updateLanAudioApiExample() {
+        const el = document.getElementById("lan-audio-api-example");
+        if (!el) return;
+        const example = {
+          params: { name: "turn02_assistant.wav" },
+          settings_override: { voice_volume_percent: selectedVolume },
+        };
+        el.textContent =
+          `curl -X POST "${location.origin}${API}/device/${id || "<device_id>"}/play_lan_audio" \\\n` +
+          `  -H "Content-Type: application/json" \\\n` +
+          `  -d '${JSON.stringify(example)}'`;
+      }
       updateVolumeUi(selectedVolume);
 
       // 文本播报：分别保留 HTTP WAV 和 WebSocket PCM 两条链路，便于现场对比验证
