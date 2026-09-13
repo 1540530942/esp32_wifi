@@ -63,8 +63,8 @@ esp_err_t AudioPlayer::play_wav_url(const std::string& url, uint8_t volume_perce
     if (!codec_) return ESP_ERR_INVALID_STATE;
     if (task_) return ESP_ERR_INVALID_STATE;
     const bool https = url.rfind("https://", 0) == 0;
-    const bool cloud_http = url.rfind("http://110.40.154.41/devices/api/", 0) == 0;
-    if (!https && !cloud_http) return ESP_ERR_INVALID_ARG;
+    const bool http = url.rfind("http://", 0) == 0;
+    if (!https && !http) return ESP_ERR_INVALID_ARG;
     pending_url_ = url;
     pending_volume_ = std::min<uint8_t>(volume_percent, 100);
     pending_pcm_ = false;
@@ -262,7 +262,7 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
 }
 
 esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_percent) {
-    if (url.rfind("http://110.40.154.41/devices/api/", 0) == 0) {
+    if (url.rfind("http://", 0) == 0) {
         return play_wav_stream_raw_http(url, volume_percent);
     }
     esp_http_client_config_t config = {};
@@ -345,20 +345,34 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
     const size_t authority_start = std::strlen(prefix);
     const size_t path_start = url.find('/', authority_start);
     if (path_start == std::string::npos) return ESP_ERR_INVALID_ARG;
-    std::string authority = url.substr(authority_start, path_start - authority_start);
+    const std::string authority = url.substr(authority_start, path_start - authority_start);
+    std::string host = authority;
+    int port = 80;
+    const size_t colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+        host = authority.substr(0, colon);
+        const char* port_text = authority.c_str() + colon + 1;
+        char* end = nullptr;
+        const long parsed = std::strtol(port_text, &end, 10);
+        if (port_text == end || *end != '\0' || parsed < 1 || parsed > 65535) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        port = static_cast<int>(parsed);
+    }
+    if (host.empty()) return ESP_ERR_INVALID_ARG;
     const int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (sock < 0) return ESP_FAIL;
     timeval timeout = {.tv_sec = 10, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     in_addr addr = {};
-    if (inet_pton(AF_INET, authority.c_str(), &addr) != 1) {
+    if (inet_pton(AF_INET, host.c_str(), &addr) != 1) {
         close(sock);
         return ESP_ERR_INVALID_ARG;
     }
     sockaddr_in peer = {};
     peer.sin_family = AF_INET;
-    peer.sin_port = htons(80);
+    peer.sin_port = htons(static_cast<uint16_t>(port));
     peer.sin_addr = addr;
     const int64_t started_us = esp_timer_get_time();
     if (connect(sock, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) != 0) {
@@ -366,7 +380,8 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
         close(sock);
         return ESP_ERR_HTTP_CONNECT;
     }
-    ESP_LOGI(TAG, "WAV raw connected connect_ms=%lld", (esp_timer_get_time() - started_us) / 1000);
+    ESP_LOGI(TAG, "WAV raw connected host=%s port=%d connect_ms=%lld", host.c_str(), port,
+             (esp_timer_get_time() - started_us) / 1000);
     const std::string request = "GET " + url.substr(path_start) +
         " HTTP/1.0\r\nHost: " + authority +
         "\r\nUser-Agent: esp32-wangyutang/1.0\r\nConnection: close\r\n\r\n";
@@ -428,24 +443,86 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
         return static_cast<int>(copied);
     };
 
-    uint8_t header[44] = {};
-    const int got = read_bytes(reinterpret_cast<char*>(header), sizeof(header));
-    ESP_LOGI(TAG, "WAV raw first read=%d", got);
-    const bool pcm16mono = got >= 44 && std::memcmp(header, "RIFF", 4) == 0 &&
-        std::memcmp(header + 8, "WAVE", 4) == 0 && header[20] == 1 &&
-        header[22] == 1 && header[34] == 16;
-    if (!pcm16mono) {
-        ESP_LOGW(TAG, "unsupported raw WAV; expected PCM 16-bit mono");
+    auto le16 = [](const uint8_t* p) -> uint16_t {
+        return static_cast<uint16_t>(p[0]) |
+               (static_cast<uint16_t>(p[1]) << 8);
+    };
+    auto le32 = [](const uint8_t* p) -> uint32_t {
+        return static_cast<uint32_t>(p[0]) |
+               (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) |
+               (static_cast<uint32_t>(p[3]) << 24);
+    };
+    auto skip_bytes = [&](size_t wanted) -> bool {
+        char scratch[256];
+        while (wanted > 0) {
+            const size_t chunk = std::min(wanted, sizeof(scratch));
+            if (read_bytes(scratch, chunk) != static_cast<int>(chunk)) return false;
+            wanted -= chunk;
+        }
+        return true;
+    };
+
+    uint8_t riff[12] = {};
+    if (read_bytes(reinterpret_cast<char*>(riff), sizeof(riff)) != sizeof(riff) ||
+        std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(riff + 8, "WAVE", 4) != 0) {
+        ESP_LOGW(TAG, "invalid raw WAV RIFF header");
         close(sock);
         return ESP_ERR_NOT_SUPPORTED;
     }
-    const uint32_t sample_rate = header[24] | (header[25] << 8) |
-                                 (header[26] << 16) | (header[27] << 24);
-    ESP_LOGI(TAG, "WAV raw format sample_rate=%u", static_cast<unsigned>(sample_rate));
-    size_t audio_remaining = static_cast<size_t>(header[40]) |
-                             (static_cast<size_t>(header[41]) << 8) |
-                              (static_cast<size_t>(header[42]) << 16) |
-                             (static_cast<size_t>(header[43]) << 24);
+
+    bool fmt_seen = false;
+    uint16_t format = 0;
+    uint16_t channels = 0;
+    uint16_t bits_per_sample = 0;
+    uint32_t sample_rate = 0;
+    size_t audio_remaining = 0;
+    for (;;) {
+        uint8_t chunk_header[8] = {};
+        if (read_bytes(reinterpret_cast<char*>(chunk_header), sizeof(chunk_header)) !=
+            sizeof(chunk_header)) {
+            close(sock);
+            return ESP_ERR_HTTP_FETCH_HEADER;
+        }
+        const uint32_t chunk_size = le32(chunk_header + 4);
+        if (std::memcmp(chunk_header, "fmt ", 4) == 0) {
+            if (chunk_size < 16) {
+                close(sock);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            uint8_t fmt[16] = {};
+            if (read_bytes(reinterpret_cast<char*>(fmt), sizeof(fmt)) != sizeof(fmt) ||
+                !skip_bytes(chunk_size - sizeof(fmt))) {
+                close(sock);
+                return ESP_ERR_HTTP_FETCH_HEADER;
+            }
+            format = le16(fmt);
+            channels = le16(fmt + 2);
+            sample_rate = le32(fmt + 4);
+            bits_per_sample = le16(fmt + 14);
+            fmt_seen = true;
+        } else if (std::memcmp(chunk_header, "data", 4) == 0) {
+            audio_remaining = chunk_size;
+            break;
+        } else if (!skip_bytes(chunk_size)) {
+            close(sock);
+            return ESP_ERR_HTTP_FETCH_HEADER;
+        }
+        if ((chunk_size & 1U) != 0 && !skip_bytes(1)) {
+            close(sock);
+            return ESP_ERR_HTTP_FETCH_HEADER;
+        }
+    }
+
+    ESP_LOGI(TAG, "WAV raw format=%u channels=%u sample_rate=%u bits=%u",
+             format, channels, static_cast<unsigned>(sample_rate), bits_per_sample);
+    if (!fmt_seen || format != 1 || channels != 1 || bits_per_sample != 16 ||
+        sample_rate != AUDIO_OUTPUT_SAMPLE_RATE || audio_remaining == 0) {
+        ESP_LOGW(TAG, "unsupported raw WAV; expected PCM 16-bit mono at %u Hz",
+                 AUDIO_OUTPUT_SAMPLE_RATE);
+        close(sock);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     ESP_LOGI(TAG, "WAV PCM bytes remaining=%u", static_cast<unsigned>(audio_remaining));
 
     // For the body, consume whatever is currently available instead of

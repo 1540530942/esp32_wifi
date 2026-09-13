@@ -32,6 +32,15 @@ config DEVICE_FIRMWARE_VERSION
     string "Firmware version"
     default "esp32-wangyutang-v1"
 
+config LOCAL_AUDIO_BASE_URL
+    string "Spark local audio HTTP base URL"
+    default "http://192.168.1.16:8080/esp32"
+    help
+      Local-only diagnostic source for the multi-turn WAV fixtures. The ESP32
+      fetches this address directly over the LAN; it never goes through the
+      device hub, MQTT, or a public audio URL. Spark should serve the fixture
+      directory with tools/serve_local_dialogue_audio.sh.
+
 endmenu
 
 menu "AEC Full-Duplex Voice"

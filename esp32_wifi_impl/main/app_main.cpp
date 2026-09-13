@@ -43,6 +43,10 @@ static EventGroupHandle_t wifi_events;
 static constexpr int WIFI_CONNECTED_BIT = BIT0;
 static constexpr char kTestAudioUrl[] =
     "https://raw.githubusercontent.com/1540530942/esp32_wifi/main/%E4%BD%A0%E4%BB%8A%E5%A4%A9%E5%A5%BD%E5%90%97.wav";
+static constexpr const char* kLocalDialogueFiles[] = {
+    "turn02_assistant.wav", "turn04_assistant.wav", "turn06_assistant.wav",
+    "turn08_assistant.wav", "turn10_assistant.wav",
+};
 static int s_volume = 30;
 static AudioPlayer* s_audio_player = nullptr;
 static MqttControlClient* s_mqtt_control = nullptr;
@@ -81,6 +85,22 @@ static void persist_volume() {
     nvs_close(handle);
     if (err != ESP_OK) ESP_LOGW(TAG, "failed to persist volume=%d: %s", s_volume,
                                 esp_err_to_name(err));
+}
+
+static bool is_local_audio_url(const char* url) {
+    if (!url) return false;
+    const char* base = CONFIG_LOCAL_AUDIO_BASE_URL;
+    const size_t base_len = std::strlen(base);
+    return base_len > 0 && std::strncmp(url, base, base_len) == 0 &&
+           (url[base_len] == '/' || url[base_len] == '\0');
+}
+
+static std::string local_dialogue_url(size_t index) {
+    constexpr size_t kLocalDialogueFileCount =
+        sizeof(kLocalDialogueFiles) / sizeof(kLocalDialogueFiles[0]);
+    std::string base = CONFIG_LOCAL_AUDIO_BASE_URL;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    return base + "/" + kLocalDialogueFiles[index % kLocalDialogueFileCount];
 }
 
 // Credentials tried in turn: a cloud-pushed one (stored in NVS, tried first
@@ -287,10 +307,10 @@ static std::string device_state() {
     return result;
 }
 
-// Mic + ASR + broadcast validation: hold the physical BOOT button (GPIO0,
-// unused elsewhere in this firmware) to record 4s, send to cloud ASR, and
-// speak the recognized text back. Polled (not interrupt-driven) since a
-// button-press response time of ~100ms is plenty for a manual hardware test.
+// BOOT button actions: single press retains the cloud mic-ASR exercise, double
+// press fetches a dialogue WAV directly from Spark over LAN HTTP, and long
+// press runs the AEC-reference probe. The double-press path uses neither the
+// device hub nor MQTT.
 static void mic_asr_button_task(void* /*arg*/) {
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO;
@@ -299,29 +319,54 @@ static void mic_asr_button_task(void* /*arg*/) {
     gpio_config(&io_conf);
     bool was_pressed = false;
     int64_t press_started_ms = 0;
+    int64_t single_press_due_ms = 0;
+    bool second_tap = false;
+    size_t local_dialogue_index = 0;
     for (;;) {
         const bool pressed = gpio_get_level(BOOT_BUTTON_GPIO) == 0;  // active-low
         if (pressed && !was_pressed) {
             vTaskDelay(pdMS_TO_TICKS(30));  // debounce
             if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
                 press_started_ms = esp_timer_get_time() / 1000;
+                if (single_press_due_ms > 0) {
+                    // Claim the pending single press as soon as the second
+                    // down-edge arrives. Otherwise its deadline could expire
+                    // while the user is still holding the second tap.
+                    single_press_due_ms = 0;
+                    second_tap = true;
+                }
             }
         } else if (!pressed && was_pressed && press_started_ms > 0) {
             const int64_t held_ms = esp_timer_get_time() / 1000 - press_started_ms;
             press_started_ms = 0;
             if (s_audio_player != nullptr && !s_audio_player->is_playing()) {
                 if (held_ms >= 800) {
+                    second_tap = false;
                     // Long press: hardware-AEC-reference diagnostic (see
                     // docs/logs/ for what this measures and why).
                     ESP_LOGI(TAG, "BOOT button long-press (%lldms) -> aec_reference_probe", held_ms);
                     esp_err_t err = s_audio_player->run_aec_reference_probe();
                     ESP_LOGI(TAG, "aec_reference_probe result=%s", esp_err_to_name(err));
+                } else if (second_tap) {
+                    const std::string url = local_dialogue_url(local_dialogue_index++);
+                    second_tap = false;
+                    ESP_LOGI(TAG, "BOOT button double-press -> local Spark WAV url=%s", url.c_str());
+                    const esp_err_t err = s_audio_player->play_wav_url(url, (uint8_t)s_volume);
+                    ESP_LOGI(TAG, "local Spark WAV start result=%s", esp_err_to_name(err));
                 } else {
-                    ESP_LOGI(TAG, "BOOT button short-press (%lldms) -> mic_asr_test", held_ms);
-                    esp_err_t err = s_audio_player->run_mic_asr_test(4, s_volume);
-                    ESP_LOGI(TAG, "mic_asr_test result=%s asr_text=\"%s\"",
-                             esp_err_to_name(err), s_audio_player->last_asr_text().c_str());
+                    // Give a second tap a short window to select local-only
+                    // playback without removing the existing single-tap test.
+                    single_press_due_ms = esp_timer_get_time() / 1000 + 350;
                 }
+            }
+        }
+        if (single_press_due_ms > 0 && esp_timer_get_time() / 1000 >= single_press_due_ms) {
+            single_press_due_ms = 0;
+            if (s_audio_player != nullptr && !s_audio_player->is_playing()) {
+                ESP_LOGI(TAG, "BOOT button single-press -> mic_asr_test");
+                const esp_err_t err = s_audio_player->run_mic_asr_test(4, s_volume);
+                ESP_LOGI(TAG, "mic_asr_test result=%s asr_text=\"%s\"",
+                         esp_err_to_name(err), s_audio_player->last_asr_text().c_str());
             }
         }
         was_pressed = pressed;
@@ -525,6 +570,10 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         } else if (cJSON_IsString(url_item) &&
                    std::strncmp(url_item->valuestring,
                                 "http://110.40.154.41/devices/api/", 33) == 0) {
+            url = url_item->valuestring;
+        } else if (cJSON_IsString(url_item) && is_local_audio_url(url_item->valuestring)) {
+            // This narrowly permits the configured Spark fixture server. It
+            // does not turn MQTT play_audio into a general LAN HTTP client.
             url = url_item->valuestring;
         } else if (cJSON_IsString(name_item) && std::strcmp(name_item->valuestring, "test") != 0) {
             if (args) cJSON_Delete(args);
