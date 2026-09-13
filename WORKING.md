@@ -39,10 +39,6 @@
 
 ## 正在做的事（用完记得删）
 
-- Claude：**合并 `cloud/device_hub/server.py` 与生产环境的双向分叉**（两个仓库
-  2026-08-31 分叉后各自演进了两周，本仓库这份比线上少 244 行）。这是把 device_hub
-  迁到本仓库这件事的最后一块：Dockerfile 和 ota_manager.py 已经同步过，只剩
-  server.py。**在合并完成前不要拿本仓库这份重建 device-hub 容器**，会丢掉线上的
-  boot_announce / upload_audio 的 play 参数 / DISPATCHED_TIMEOUT_S。
-  合并完成后在其上加新 action `play_lan_audio`。涉及文件：
-  `cloud/device_hub/server.py`、`cloud/device_hub/ota_manager.py`。
+（空 —— 目前没有人在做跨文件大改动。`cloud/device_hub/server.py` 与生产的分叉已于
+2026-09-14 合并并部署，详见 `docs/logs/2026-09-14-device-hub-fork-merge.md` 与
+`docs/logs/2026-09-14-device-hub-production-deploy.md`。）
