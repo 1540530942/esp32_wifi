@@ -68,3 +68,17 @@
   id 为 `c-22f1e2`、`c-083e26`，后续排查控制链路时可据此追溯。
 - 自动化已经覆盖完整的本地取流/播放入口；BOOT 双击的物理按键手感与双击窗口仍需人在
   设备旁最终确认。每次成功双击依次轮播第 2、4、6、8、10 轮，随后循环。
+
+## Wi-Fi 持久化与通用 OTA 验收（追加）
+
+- 发现旧版 `network/ssid,password` 与当前多凭据实现的 `wifi_remote/ssid,pass` 命名空间
+  不一致，且 CI 的 `sdkconfig.defaults` 保持空凭据。新增幂等引导：本地凭据版仅在
+  `wifi_remote` 为空时写入已验证的编译期主 Wi-Fi，已有远程配置不会覆盖；密码未进入 Git
+  或 CI。
+- 设备 USB 启动该版本后成功上线并保留网页设置的音量；随后发布无编译期 Wi-Fi 的
+  `esp32-wangyutang-v35-wifi-nvs`，release `rel-1b2f4aab75fa`，Actions run
+  `34763268803`。
+- OTA job `ota-c6de382c49e1` 已完成 `verified`：设备接受下载、重启，并以 v35 重新上线。
+  这证明后续通用 OTA 可以依赖设备 NVS 凭据，不需要把 Wi-Fi 密码放进 OTA 镜像。
+- 此后 Spark 仍持续运行 `192.168.1.16:8080`；设备双击 BOOT 的实测访问日志已出现
+  `turn02`、`turn04`、`turn06` 三个轮次，均来自 `192.168.1.15` 且 HTTP 200。
