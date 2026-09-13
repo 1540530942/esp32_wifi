@@ -36,10 +36,35 @@
 5. 曾误启动一次 `esp32` 目标构建，已立即停止，并把构建自动产生的
    `dependencies.lock` 改动恢复；该错误产物没有烧录或发布。
 
-## 当前运行态（发布前）
+## 构建、OTA 与恢复结果
 
-- 设备 `esp32-s3-walle` 在线，固件 `esp32-wangyutang-v33-remotewifi`，局域网地址
-  `192.168.1.15`，Spark 为 `192.168.1.16`，RSSI -56 dBm，音量 40。
-- Spark 已生成 5 个 16 kHz 副本，并已在 `192.168.1.16:8080` 启动静态服务。
+- 功能提交为 `22abd10`，tag 为 `ota-esp32-wangyutang-v34-local-audio`。GitHub
+  Actions run `34760598090` 使用 ESP-IDF 5.5.4 构建成功，发布版本为
+  `esp32-wangyutang-v34-local-audio`，release id `rel-04e2ee45f41e`。
+- OTA job `ota-060ecc03d8f6` 能被设备接收且镜像完整写入，但 CI 通用镜像不带真实编译期
+  Wi-Fi 凭据，设备重启后无法联网，最终 job 正确结束为 `failed`。这不是音频实现失败，
+  而是当前设备在通用 OTA 镜像下没有预先可用的 `wifi_remote` 凭据。
+- 为恢复设备，先通过 USB 仅重写 app 分区，保留 NVS、音量和设备身份。排查时一度把
+  `otadata` 地址误读成 `0xe000`；本工程 `partitions.csv` 中真实地址是 `0xf000`，seq=3
+  对应活动槽 `ota_0`（地址 `0x20000`）。写入非活动 `ota_1` 不会改变启动固件。
+- 曾通过 `wifi_set_remote` 写入一组后来无法连接的凭据。恢复固件只删除
+  `wifi_remote/ssid` 与 `wifi_remote/pass` 两个键，未擦除整个 NVS；恢复上线后立即刷回
+  不含清理逻辑的正式 v34。
+- Spark 本地 ESP-IDF 5.5.5 构建出的正式镜像大小为 2460224 bytes，写入活动
+  `ota_0` 后 hash 校验通过。
+
+## 实机验证与当前运行态
+
+- Spark 已生成 5 个 16 kHz 副本，并持续在 `192.168.1.16:8080` 提供静态服务。
 - Spark 本机请求 `turn02_assistant.wav`：HTTP 200，首字节约 1.9 ms，253518 bytes。
-- 尚待：GitHub Actions 构建、OTA 登记与下发、设备端双击实测和首声延迟记录。
+- 为排除云端控制链路影响，刷入一次性本地启动自测镜像。2026-09-13 22:18:02，Spark
+  记录到来源 `192.168.1.15` 的
+  `GET /esp32/turn02_assistant.wav HTTP/1.0`，HTTP 200；证明 ESP32 已直接从 Spark 获取并
+  播放本地 WAV。自测后已移除启动播放逻辑并重新刷回正式镜像，重启没有再次自动 GET。
+- 当前设备 `esp32-s3-walle` 在线，固件 `esp32-wangyutang-v34-local-audio`，IP
+  `192.168.1.15`，音量 40。NVS 中的原音量得到保留。
+- 两次通过网页 API 排队的临时 `play_audio` 测试命令停在 `dispatched`，设备没有访问
+  Spark；这是当前 MQTT 下发链路的独立问题，不影响 BOOT 双击的纯本地路径。测试命令
+  id 为 `c-22f1e2`、`c-083e26`，后续排查控制链路时可据此追溯。
+- 自动化已经覆盖完整的本地取流/播放入口；BOOT 双击的物理按键手感与双击窗口仍需人在
+  设备旁最终确认。每次成功双击依次轮播第 2、4、6、8、10 轮，随后循环。

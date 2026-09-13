@@ -34,5 +34,3 @@
    - 参考格式见 `docs/logs/2026-09-13-multiturn-dialogue-audio-prep.md`。
 
 ## 正在做的事（用完记得删）
-
-- Codex：本地 Spark→ESP32 多轮 WAV 播报诊断通路（不走 device_hub/MQTT）；涉及固件播放白名单、BOOT 键触发与本地服务脚本。
