@@ -24,15 +24,18 @@
           <button class="tab" data-tab="upload">上传音频</button>
           <button class="tab" data-tab="lan">局域网素材</button>
         </div>
+        <div class="volume-control" aria-label="播报音量">
+          <span>音量</span>
+          <button class="btn volume-step" id="volume-down" type="button">−</button>
+          <input id="volume-range" type="range" min="0" max="100" step="5" value="30" />
+          <button class="btn volume-step" id="volume-up" type="button">＋</button>
+          <output id="volume-value">30%</output>
+        </div>
+        <p class="lead" style="font-size:0.78rem;margin:4px 0 12px">
+          三个标签页共用这一个音量（局域网素材/文本播报下发时生效；上传音频按设备当前音量播放，不受此项影响）。
+        </p>
         <div class="tab-body" id="tab-text">
           <textarea id="speak-text" rows="3" placeholder="输入要播报的文字，平台自动生成语音下发给设备…"></textarea>
-          <div class="volume-control" aria-label="播报音量">
-            <span>音量</span>
-            <button class="btn volume-step" id="volume-down" type="button">−</button>
-            <input id="volume-range" type="range" min="0" max="100" step="5" value="30" />
-            <button class="btn volume-step" id="volume-up" type="button">＋</button>
-            <output id="volume-value">30%</output>
-          </div>
           <div class="actions" style="margin-top:8px">
             <button class="btn primary" id="btn-speak-pcm">PCM生成并播报</button>
             <button class="btn" id="btn-speak-http">HTTP生成并播报</button>
