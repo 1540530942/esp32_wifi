@@ -329,7 +329,8 @@ def install_ota_routes(
                             elif command and command.get("status") == "failed":
                                 next_state = "failed"
                                 message = str(command.get("message") or "device reported OTA failure")
-                            elif command and command.get("status") == "done":
+                            elif command and command.get("status") == "done" and \
+                                    now - float(job.get("created_at", now)) <= OTA_JOB_TIMEOUT_S:
                                 next_state = "rebooting"
                                 message = str(command.get("message") or "image applied; waiting for reboot")
                             elif command and int(command.get("ota_progress_bytes") or 0) > int(target.get("progress_bytes") or 0):

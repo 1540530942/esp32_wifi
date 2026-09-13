@@ -13,6 +13,7 @@ v1 从简:不做鉴权,所有接口开放。
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import secrets
@@ -47,6 +48,10 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 TTS_URL = os.environ.get("TTS_URL", "http://audio-interact:8097/api/tts")
 AUDIO_PUBLIC_BASE = os.environ.get("AUDIO_PUBLIC_BASE", "https://www.wangyutang.cn/devices/api/audio")
+# Must match the ESP32 firmware's CONFIG_LOCAL_AUDIO_BASE_URL default -- the
+# firmware's play_audio URL allow-list only accepts this exact prefix, so
+# changing one side without the other silently breaks play_lan_audio.
+LOCAL_AUDIO_BASE_URL = os.environ.get("LOCAL_AUDIO_BASE_URL", "http://192.168.1.16:8080/esp32")
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20MB
 TEST_AUDIO_TEXT = "早上好，我的公主"
 TEST_AUDIO_PATH = AUDIO_DIR / "test-morning-princess.wav"
@@ -58,6 +63,7 @@ MAX_LOGS = 200                     # 每设备环形日志上限
 MAX_COMMAND_HISTORY = 50           # 每设备已完成指令保留上限
 KNOWN_ACTIONS = {"reboot", "set_volume", "identify", "ota", "play_audio", "stop_audio", "stream_prepare"}
 OFFLINE_ALERT_AFTER_S = 90    # 超过此时长无心跳 → 记录告警（过滤 TLS 短暂阻塞）
+DISPATCHED_TIMEOUT_S = 300    # dispatched 超此时长未收到 ACK → 自动标 failed
 ALERTS_FILE = DATA_DIR / "alerts.jsonl"
 MAX_ALERTS = 500
 
@@ -318,6 +324,15 @@ def _check_offline_alerts() -> None:
                     logs.append({"level": "warn", "message": f"离线已 {int(gone_for)}s，告警已记录", "ts": now})
                     del logs[:-MAX_LOGS]
                     changed = True
+                # Auto-expire stale dispatched commands
+                for c in rec.get("commands", []):
+                    if c.get("status") == "dispatched":
+                        dispatched_at = c.get("dispatched_at") or 0.0
+                        if dispatched_at > 0 and (now - dispatched_at) > DISPATCHED_TIMEOUT_S:
+                            c["status"] = "failed"
+                            c["done_at"] = now
+                            c["message"] = f"timeout: no ACK after {int(now - dispatched_at)}s"
+                            changed = True
             if changed:
                 _save(data)
         for alert in alerts_to_write:
@@ -588,6 +603,95 @@ def speak(device_id: str, req: SpeakReq) -> Any:
     }
 
 
+class PlayLanAudioParams(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class PlayLanAudioSettings(BaseModel):
+    voice_volume_percent: int | None = Field(None, ge=0, le=100)
+
+
+class PlayLanAudioReq(BaseModel):
+    params: PlayLanAudioParams
+    settings_override: PlayLanAudioSettings = Field(default_factory=PlayLanAudioSettings)
+
+
+@app.post("/api/device/{device_id}/play_lan_audio")
+def play_lan_audio(device_id: str, req: PlayLanAudioReq) -> Any:
+    """播放 Spark 局域网静态服务器上已就位的 WAV，不经过 TTS/上传，直接 MQTT 下发
+    `play_audio`。
+
+    命名说明：这跟树莓派 `action_move` 的 `play_local_audio` 不是同一回事——那边
+    文件真的预先存在设备本地磁盘；这里文件其实在 Spark 上，ESP32 每次都要通过
+    局域网 HTTP 现拉现播，只是延迟低到可以忽略（首字节约 2ms），不是真正的
+    "零网络"。刻意走 MQTT 而不是通用 `/command`（心跳下发）：实测心跳轮询本身有
+    0~5s 的排队延迟，是"快速播报"这个目标下最大的瓶颈，跟音频获取方式无关
+    （见 `docs/logs/2026-09-14-heartbeat-fallback-empty-response-fix.md`）。
+
+    `params.name` 必须是裸文件名（不含路径分隔符/`..`）——这里的校验只是不让
+    明显错误的请求白跑一趟 MQTT，设备侧固件的 URL 白名单（`is_local_audio_url`）
+    才是最终防线。
+    """
+    name = req.params.name.strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return _err(400, "invalid_name", "name 必须是裸文件名，不能包含路径分隔符或 ..")
+
+    with DATA_LOCK:
+        data = _load()
+        if device_id not in data:
+            return _err(404, "not_found", "unknown device_id")
+
+    audio_url = f"{LOCAL_AUDIO_BASE_URL}/{name}"
+    volume = req.settings_override.voice_volume_percent
+    args: dict[str, Any] = {"url": audio_url}
+    if volume is not None:
+        args["volume"] = volume
+    text = f"[play_lan_audio] {name}"
+
+    with DATA_LOCK:
+        data = _load()
+        rec = data.get(device_id)
+        if rec is None:
+            return _err(404, "not_found", "unknown device_id")
+        command_id = "c-" + secrets.token_hex(3)
+        rec.setdefault("commands", []).append({
+            "id": command_id,
+            "action": "play_audio",
+            "text": text,
+            "args": args,
+            # Reserve the command before MQTT publish so heartbeat cannot
+            # race it and mark it dispatched without MQTT delivery.
+            "status": "dispatching",
+            "created_at": time.time(),
+            "dispatched_at": 0.0,
+            "done_at": 0.0,
+            "message": "",
+            "transport": "mqtt",
+        })
+        data[device_id] = rec
+        _save(data)
+    published = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
+        device_id, command_id, "play_audio", args, text,
+    )
+    with DATA_LOCK:
+        data = _load()
+        rec = data[device_id]
+        for command in rec.get("commands", []):
+            if command.get("id") == command_id:
+                if command.get("status") == "dispatching":
+                    command["status"] = "dispatched" if published else "pending"
+                    command["dispatched_at"] = time.time() if published else 0.0
+                    command["transport"] = "mqtt" if published else "heartbeat"
+                break
+        _save(data)
+    return {
+        "ok": True,
+        "command_id": command_id,
+        "audio_url": audio_url,
+        "transport": "mqtt" if published else "heartbeat",
+    }
+
+
 class TestAudioReq(BaseModel):
     volume: int = Field(30, ge=0, le=100)
 
@@ -651,6 +755,100 @@ def test_audio(device_id: str, req: TestAudioReq) -> Any:
                     c["status"] = "pending"; c["transport"] = "heartbeat"
             _save(data)
     return {"ok": True, "command_id": command_id, "audio_url": audio_url, "text": TEST_AUDIO_TEXT, "transport": "mqtt" if _mqtt_enqueue_ok else "heartbeat"}
+
+
+_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+BOOT_ANNOUNCE_VOLUME = 40
+
+
+def _boot_announce_for(device_id: str) -> Any:
+    """生成开机播报并通过 MQTT 下发 play_audio（40%音量）。"""
+    with DATA_LOCK:
+        data = _load()
+        if device_id not in data:
+            return _err(404, "not_found", "unknown device_id")
+        fw = data[device_id].get("state", {}).get("firmware", "unknown")
+
+    now = datetime.datetime.now()
+    weekday = _WEEKDAYS[now.weekday()]
+    text = f"今天是{now.month}月{now.day}日，{weekday}，固件版本{fw}"
+
+    try:
+        body = json.dumps({"text": text}).encode()
+        tts_req = urllib.request.Request(
+            TTS_URL, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(tts_req, timeout=30) as resp:
+            wav_bytes = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return _err(502, "tts_error", f"TTS 服务不可达: {e}")
+
+    filename = "boot-" + secrets.token_hex(8) + ".wav"
+    (AUDIO_DIR / filename).write_bytes(wav_bytes)
+    audio_url = f"{AUDIO_PUBLIC_BASE}/{filename}"
+    args = {"url": audio_url, "volume": BOOT_ANNOUNCE_VOLUME}
+
+    with DATA_LOCK:
+        data = _load()
+        rec = data.get(device_id)
+        if rec is None:
+            return _err(404, "not_found", "unknown device_id")
+        command_id = "c-" + secrets.token_hex(3)
+        rec.setdefault("commands", []).append({
+            "id": command_id,
+            "action": "play_audio",
+            "text": text,
+            "args": args,
+            # Reserve before publishing, like every other MQTT sender here.
+            "status": "dispatching",
+            "created_at": time.time(),
+            "dispatched_at": 0.0,
+            "done_at": 0.0,
+            "message": "",
+            "transport": "mqtt",
+        })
+        data[device_id] = rec
+        _save(data)
+
+    published = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
+        device_id, command_id, "play_audio", args, text,
+    )
+    with DATA_LOCK:
+        data = _load()
+        rec = data[device_id]
+        for c in rec.get("commands", []):
+            if c.get("id") == command_id and c.get("status") == "dispatching":
+                c["status"] = "dispatched" if published else "pending"
+                c["dispatched_at"] = time.time() if published else 0.0
+                c["transport"] = "mqtt" if published else "heartbeat"
+                break
+        _save(data)
+
+    return {
+        "ok": True,
+        "command_id": command_id,
+        "text": text,
+        "audio_url": audio_url,
+        "transport": "mqtt" if published else "heartbeat",
+    }
+
+
+class BootAnnounceReq(BaseModel):
+    device_id: str = Field(..., min_length=1)
+
+
+@app.post("/api/boot_announce")
+def boot_announce_from_device(req: BootAnnounceReq) -> Any:
+    """端侧开机/OTA 后调用（device_id 在 body）。"""
+    return _boot_announce_for(req.device_id)
+
+
+@app.post("/api/device/{device_id}/boot_announce")
+def boot_announce(device_id: str) -> Any:
+    """平台页面/手动触发（device_id 在 URL）。"""
+    return _boot_announce_for(device_id)
 
 
 class SpeakPcmReq(BaseModel):
@@ -758,8 +956,15 @@ async def pcm_websocket(websocket: WebSocket, device_id: str, stream_id: str = "
 
 
 @app.post("/api/device/{device_id}/upload_audio")
-async def upload_audio(device_id: str, file: UploadFile = File(...)) -> Any:
-    """上传音频文件 → 保存 → 下发 play_audio 给设备。"""
+async def upload_audio(
+    device_id: str, file: UploadFile = File(...), play: bool = True
+) -> Any:
+    """上传音频文件 → 保存 →（默认）下发 play_audio 给设备。
+
+    `play=0` 只存不播。设备把自己录的音传上来时必须用这个：默认行为会给它回发
+    play_audio，抢走扬声器 —— AEC 采样时这会掐断正在循环播放的远端，而且这些命令
+    是 retained 的，下次启动还会重放。
+    """
     with DATA_LOCK:
         data = _load()
         if device_id not in data:
@@ -774,6 +979,8 @@ async def upload_audio(device_id: str, file: UploadFile = File(...)) -> Any:
     (AUDIO_DIR / filename).write_bytes(content)
 
     audio_url = f"{AUDIO_PUBLIC_BASE}/{filename}"
+    if not play:
+        return {"ok": True, "command_id": "", "audio_url": audio_url, "played": False}
     with DATA_LOCK:
         data = _load()
         rec = data.get(device_id)
@@ -792,7 +999,7 @@ async def upload_audio(device_id: str, file: UploadFile = File(...)) -> Any:
         })
         data[device_id] = rec
         _save(data)
-    return {"ok": True, "command_id": command_id, "audio_url": audio_url}
+    return {"ok": True, "command_id": command_id, "audio_url": audio_url, "played": True}
 
 
 @app.get("/api/audio/{filename}")
