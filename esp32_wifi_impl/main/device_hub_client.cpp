@@ -71,7 +71,14 @@ static esp_err_t post_http_raw(const std::string& base_url, const std::string& p
             sent += static_cast<size_t>(n);
         }
         if (sent == request.size()) {
-            shutdown(sock, SHUT_WR);
+            // Do NOT half-close (shutdown SHUT_WR) here. Caddy's reverse proxy
+            // treats the client's early FIN as an abort signal mid-proxy and
+            // answers with its own synthesized empty 200 (Content-Length: 0,
+            // "Server: Caddy" only, upstream never reached) instead of relaying
+            // the real uvicorn response -- reproduced directly against
+            // 110.40.154.41:80 with a raw socket. The request already carries
+            // Content-Length and Connection: close, so the server has every-
+            // thing it needs to frame the body without this signal.
             std::string raw;
             char buffer[1024];
             int n;
