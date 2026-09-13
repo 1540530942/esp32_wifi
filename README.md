@@ -71,3 +71,4 @@ Wi-Fi 密码只在首次 USB 配置时写入 NVS，后续 OTA 镜像从 NVS 读�
 
 完整固件工程位于 `esp32_wifi_impl/`，云侧控制面源码位于 `cloud/device_hub/`。
 自动化发布和现场操作见 [`docs/OTA_RELEASE.md`](docs/OTA_RELEASE.md)。
+新会话接续工作请先阅读 [`AGENTS.md`](AGENTS.md) 和 [`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md)；历史联调与排障记录见 [`docs/history/`](docs/history/)。
