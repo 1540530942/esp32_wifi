@@ -119,6 +119,38 @@ static int s_wifi_fails = 0;
 
 static const char* kWifiRemoteNvsNamespace = "wifi_remote";
 
+// A locally provisioned build has a known-good primary credential, while a
+// generic CI OTA image intentionally has empty compiled credentials. Persist
+// the local credential once so all later generic OTA images can reconnect
+// from NVS. Never overwrite a cloud-provisioned remote credential.
+static esp_err_t wifi_seed_remote_from_compiled(void) {
+    if (CONFIG_DEVICE_WIFI_SSID[0] == '\0') return ESP_OK;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(kWifiRemoteNvsNamespace, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    size_t stored_ssid_len = 0;
+    const esp_err_t get_err = nvs_get_str(h, "ssid", nullptr, &stored_ssid_len);
+    if (get_err == ESP_OK && stored_ssid_len > 1) {
+        nvs_close(h);
+        return ESP_OK;
+    }
+    if (get_err != ESP_ERR_NVS_NOT_FOUND && get_err != ESP_OK) {
+        nvs_close(h);
+        return get_err;
+    }
+
+    err = nvs_set_str(h, "ssid", CONFIG_DEVICE_WIFI_SSID);
+    if (err == ESP_OK) err = nvs_set_str(h, "pass", CONFIG_DEVICE_WIFI_PASSWORD);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "seeded Wi-Fi credential in NVS for future generic OTA images");
+    }
+    return err;
+}
+
 // (Re)build s_wifi_creds: slot 0 is the NVS-stored remote credential if one
 // is saved and non-empty, followed by the compiled-in primary and backup.
 // Called at boot and again whenever the cloud pushes a new remote credential.
@@ -1009,6 +1041,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
 extern "C" void app_main() {
     ESP_LOGI(TAG, "reset_reason=%d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(wifi_seed_remote_from_compiled());
     load_persisted_settings();
 
     // LCD enabled in v15 - JTAG disabled in sdkconfig to free GPIO 5-8

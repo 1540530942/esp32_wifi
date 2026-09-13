@@ -39,14 +39,16 @@ device_hub 数据卷中的 `ota_audit.jsonl`。
   `https://www.wangyutang.cn/devices/api/ota/releases`
 - Repository secret `OTA_PUBLISH_TOKEN`：云端设置同名环境变量后必须配置；未设置时当前联调阶段不鉴权。
 
-Actions 构建的通用 OTA 镜像不包含 Wi-Fi 密码。设备从 NVS 的 `network/ssid` 和
-`network/password` 读取网络配置。
+Actions 构建的通用 OTA 镜像不包含 Wi-Fi 密码。设备从 NVS 的 `wifi_remote/ssid` 和
+`wifi_remote/pass` 读取网络配置。本地凭据版首次启动时，如果该命名空间尚无凭据，会把
+已验证的编译期主 Wi-Fi 写入其中；已有远程凭据不会被覆盖。完成这次 USB 引导后，后续
+通用 OTA 镜像即可复用 NVS 凭据联网。
 
 ## 首次启用 rollback
 
 Bootloader rollback 是 Bootloader 功能，不能仅通过应用 OTA 更新。现有设备需要一次 USB
-刷写新版 `bootloader.bin`。首次 v5 固件使用本地配置连接 Wi-Fi，并把配置持久化到 NVS；
-完成这次引导后，后续版本可全部通过 GitHub Actions + OTA 页面发布。
+刷写新版 `bootloader.bin`。首次本地凭据版固件使用编译期配置连接 Wi-Fi，并把配置持久化
+到 NVS；完成这次引导后，后续版本可全部通过 GitHub Actions + OTA 页面发布。
 
 ## 成功标准
 

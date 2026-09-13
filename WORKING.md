@@ -34,3 +34,5 @@
    - 参考格式见 `docs/logs/2026-09-13-multiturn-dialogue-audio-prep.md`。
 
 ## 正在做的事（用完记得删）
+
+- Codex：修复本地凭据到 `wifi_remote` NVS 的 OTA 引导，并执行一次通用镜像 OTA 实机验收。
