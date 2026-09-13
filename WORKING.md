@@ -39,8 +39,10 @@
 
 ## 正在做的事（用完记得删）
 
-- Claude：排查通用 `/api/device/{id}/command` 入口下发 `play_audio` 卡在 `dispatched`
-  的问题，并在 `cloud/device_hub/server.py` 加一个新 action `play_lan_audio`
-  （params.name→拼 `CONFIG_LOCAL_AUDIO_BASE_URL` 播放局域网音频，
-  settings_override.voice_volume_percent→现有 volume 参数）。涉及文件：
-  `cloud/device_hub/server.py`（可能还有 `static/device.html`）。
+- Claude：**合并 `cloud/device_hub/server.py` 与生产环境的双向分叉**（两个仓库
+  2026-08-31 分叉后各自演进了两周，本仓库这份比线上少 244 行）。这是把 device_hub
+  迁到本仓库这件事的最后一块：Dockerfile 和 ota_manager.py 已经同步过，只剩
+  server.py。**在合并完成前不要拿本仓库这份重建 device-hub 容器**，会丢掉线上的
+  boot_announce / upload_audio 的 play 参数 / DISPATCHED_TIMEOUT_S。
+  合并完成后在其上加新 action `play_lan_audio`。涉及文件：
+  `cloud/device_hub/server.py`、`cloud/device_hub/ota_manager.py`。
