@@ -69,22 +69,35 @@ static volatile int     s_click_latency_ms = -1;
 // noise). So the robot's own onsets appear on BOTH channels, and only an
 // external sound appears on ch0 alone. That is the discriminator, and it costs
 // one extra peak per frame.
-static float s_click_env = 0.0f;     // ch0, microphone
-static float s_click_env_ref = 0.0f; // ch1, hardware reference
+// The quantity actually tested is the RATIO ch0/ch1, not either level.
+//
+// Second correction, after v49: "reject the frame if ch1 also jumped" does not
+// work either. During playback ch1 is loud, so its envelope is high, and a
+// moderate ch1 rise still satisfies "within +6 dB of its own envelope" -- the
+// gate was true almost always and the detector still fired on the robot's
+// speech.
+//
+// The echo path has a roughly fixed gain G, so peak0 ~= G * peak_ref while the
+// robot is the only source. A syllable onset raises BOTH, leaving the ratio
+// unchanged; an external click raises only the numerator, so the ratio jumps.
+// Testing the ratio against its own envelope is therefore the discriminator,
+// and it degrades gracefully: with nothing playing peak_ref ~= 0, the
+// denominator floors at 1 and the test becomes the plain ch0-level test.
+static float s_click_env_ratio = 0.0f;
+static int16_t s_click_prev_ref = 0;   // previous frame's ch1 peak (see below)
 static uint32_t s_click_frames = 0;
 #define CLICK_ENV_ALPHA      0.05f   // ~20 frames (~320 ms) time constant
-#define CLICK_TRIGGER_RATIO  4.0f    // ch0 must clear its envelope by +12 dB
-#define CLICK_REF_QUIET_RATIO 2.0f   // ...while ch1 stays within +6 dB of its own
+#define CLICK_TRIGGER_RATIO  4.0f    // ch0/ch1 must clear its envelope by +12 dB
 #define CLICK_MIN_PEAK       2000    // absolute floor, keeps silence from firing
-#define CLICK_SEED_FRAMES    16      // let the envelopes settle before arming fires
+#define CLICK_SEED_FRAMES    16      // let the envelope settle before arming fires
 
 void afe_click_arm(void)
 {
     s_click_us = 0;
     s_click_duck_us = 0;
     s_click_latency_ms = -1;
-    s_click_env = 0.0f;
-    s_click_env_ref = 0.0f;
+    s_click_env_ratio = 0.0f;
+    s_click_prev_ref = 0;
     s_click_frames = 0;
     s_click_armed = true;
     ESP_LOGI(TAG, "click detector armed at t=%lld us", (long long)esp_timer_get_time());
@@ -105,41 +118,53 @@ bool afe_click_result(int64_t *click_us, int64_t *duck_us, int *latency_ms)
 static void click_scan(const int16_t *buf, int chunk, int nch, int64_t frame_end_us)
 {
     int16_t peak = 0, peak_ref = 0;
-    int first = -1;
-    const float thr_rel = s_click_env * CLICK_TRIGGER_RATIO;
-    const float thr = thr_rel > (float)CLICK_MIN_PEAK ? thr_rel : (float)CLICK_MIN_PEAK;
     for (int f = 0; f < chunk; f++) {
         int16_t v = buf[f * nch + 0];
         int16_t a = v < 0 ? (int16_t)-v : v;
         if (a > peak) peak = a;
-        int16_t r = nch > 1 ? buf[f * nch + 1] : 0;
-        int16_t ra = r < 0 ? (int16_t)-r : r;
-        if (ra > peak_ref) peak_ref = ra;
-        if (first < 0 && s_click_frames >= CLICK_SEED_FRAMES && (float)a > thr) first = f;
+        if (nch > 1) {
+            int16_t r = buf[f * nch + 1];
+            int16_t ra = r < 0 ? (int16_t)-r : r;
+            if (ra > peak_ref) peak_ref = ra;
+        }
     }
-    // The robot's own onsets light up the reference tap in the same frame; an
-    // external click does not. Reject the frame if ch1 jumped too. Without a
-    // reference channel (nch == 1) there is nothing to gate on and the ch0 test
-    // stands alone -- which is the configuration that misfires, so say so.
-    const bool ref_quiet =
-        nch < 2 || (float)peak_ref <= s_click_env_ref * CLICK_REF_QUIET_RATIO + (float)CLICK_MIN_PEAK;
-    if (first >= 0 && !ref_quiet) {
-        ESP_LOGD(TAG, "click candidate rejected: ref channel moved too (peak_ref=%d env_ref=%d)",
-                 (int)peak_ref, (int)s_click_env_ref);
-        first = -1;
-    }
-    if (first >= 0 && s_click_us == 0) {
+
+    // ch1 is an electrical tap and leads the acoustic path by the speaker->mic
+    // flight time, so a robot onset near a frame boundary can land on ch1 in
+    // frame N and on ch0 in frame N+1. Taking the larger of this frame's and the
+    // previous frame's ch1 peak covers that skew; without it, every syllable
+    // that straddles a boundary looks exactly like a click.
+    const int16_t ref_win = peak_ref > s_click_prev_ref ? peak_ref : s_click_prev_ref;
+    const float ratio = (float)peak / ((float)ref_win + 1.0f);
+
+    bool fire = s_click_frames >= CLICK_SEED_FRAMES &&
+                peak > CLICK_MIN_PEAK &&
+                ratio > s_click_env_ratio * CLICK_TRIGGER_RATIO;
+
+    if (fire && s_click_us == 0) {
+        // Locate the crossing inside the frame. The per-sample threshold is the
+        // ch0 level that the reference window would have had to produce, scaled
+        // by the ratio envelope -- i.e. the level at which this sample stops
+        // being explainable as echo.
+        const float sample_thr = s_click_env_ratio * CLICK_TRIGGER_RATIO * ((float)ref_win + 1.0f);
+        int first = 0;
+        for (int f = 0; f < chunk; f++) {
+            int16_t v = buf[f * nch + 0];
+            int16_t a = v < 0 ? (int16_t)-v : v;
+            if ((float)a > sample_thr && a > CLICK_MIN_PEAK) { first = f; break; }
+        }
         // frame_end_us is when the whole frame had been read, so the sample at
         // index `first` happened (chunk - first) samples earlier.
         s_click_us = frame_end_us - (int64_t)(chunk - first) * 1000000 / 16000;
         s_click_armed = false;
-        ESP_LOGI(TAG, "click onset at t=%lld us (peak=%d thr=%d env=%d ref_peak=%d ref_env=%d)",
-                 (long long)s_click_us, (int)peak, (int)thr, (int)s_click_env,
-                 (int)peak_ref, (int)s_click_env_ref);
+        ESP_LOGI(TAG, "click onset at t=%lld us (peak=%d ref_win=%d ratio=%.2f env_ratio=%.2f)",
+                 (long long)s_click_us, (int)peak, (int)ref_win,
+                 (double)ratio, (double)s_click_env_ratio);
         return;
     }
-    s_click_env = s_click_env * (1.0f - CLICK_ENV_ALPHA) + (float)peak * CLICK_ENV_ALPHA;
-    s_click_env_ref = s_click_env_ref * (1.0f - CLICK_ENV_ALPHA) + (float)peak_ref * CLICK_ENV_ALPHA;
+
+    s_click_env_ratio = s_click_env_ratio * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
+    s_click_prev_ref = peak_ref;
     s_click_frames++;
 }
 
