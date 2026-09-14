@@ -122,6 +122,17 @@ void AudioPlayer::task_entry(void* arg) {
     }
 }
 
+// esp_codec_dev_close() -> i2s_channel_disable() drops whatever is still in the
+// DMA ring instead of draining it, so disabling the output the instant the last
+// write returns throws away up to AUDIO_CODEC_DMA_DESC_NUM * DMA_FRAME_NUM =
+// 6 * 240 = 1440 frames = 90 ms at 16 kHz -- the tail of every single utterance,
+// roughly the last Chinese character. Wait it out on a normal finish. On a
+// barge-in we *want* the ring dropped, so the caller skips this.
+void AudioPlayer::drain_output() const {
+    vTaskDelay(pdMS_TO_TICKS(AUDIO_CODEC_DMA_DESC_NUM * AUDIO_CODEC_DMA_FRAME_NUM * 1000
+                                 / AUDIO_OUTPUT_SAMPLE_RATE + 20));
+}
+
 void AudioPlayer::note_samples_written(int samples) {
     if (samples <= 0) return;
     int64_t expected = 0;
@@ -313,7 +324,10 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
         if (written != samples) ESP_LOGW(TAG, "PCM short write requested=%d written=%d", samples, written);
         total_bytes += static_cast<size_t>(read_result);
     }
-    if (output_enabled) AudioCodec_EnableOutput(codec_, false);
+    if (output_enabled) {
+        if (!stop_requested_) drain_output();
+        AudioCodec_EnableOutput(codec_, false);
+    }
     // esp_transport_destroy() only frees the transport object; close the
     // WebSocket first so the TLS parent releases its live connection before
     // its mbedTLS context is destroyed.
@@ -406,6 +420,7 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
         }
         vTaskDelay(1);
     }
+    if (!stop_requested_) drain_output();
     AudioCodec_EnableOutput(codec_, false);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -675,6 +690,7 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
                      static_cast<unsigned>(audio_remaining));
         }
     }
+    if (!stop_requested_) drain_output();
     AudioCodec_EnableOutput(codec_, false);
     close(sock);
     if (stop_requested_) {

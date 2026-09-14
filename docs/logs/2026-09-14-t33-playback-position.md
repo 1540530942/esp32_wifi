@@ -74,8 +74,41 @@ playback position: written=27200ms played=12480ms dropped=14720ms
 {"spk_buffer_ms": 0, "spk_played_ms": 0}
 ```
 
-空闲时都是 0；播放中 `spk_buffer_ms` 应该是几百毫秒量级（DMA 环深度），
-`spk_played_ms` 单调增长。
+空闲时都是 0；播放中 `spk_played_ms` 单调增长。
+
+`spk_buffer_ms` 的量级由 DMA 环深度决定，`audio/audio_codec.h`：
+
+```c
+#define AUDIO_CODEC_DMA_DESC_NUM 6
+#define AUDIO_CODEC_DMA_FRAME_NUM 240
+```
+
+6 × 240 = 1440 帧 @ 16 kHz = **90 ms 上限**。所以播放中这个字段应该在 0–90ms 之间，
+**不是几百毫秒**；读到远大于 90 的值说明估计逻辑有问题（比如时钟起点选错）。
+
+## 顺带查出来的一个真实缺陷：每段话的结尾被吃掉 90ms
+
+量 DMA 环深度的时候发现的。`AudioCodec_EnableOutput(codec_, false)` 走到
+`esp_codec_dev_close()` → `i2s_channel_disable()`，而 **`i2s_channel_disable()` 是
+直接丢弃环里剩余内容，不是排空**。
+
+三条播放路径都是"最后一次写入返回后立刻关输出"，所以**每一段话的最后 90ms 都被
+丢掉了**——16kHz 下大约是最后一个汉字。安静时不明显（末尾往往是尾音），但它一直
+在发生。
+
+修法是关输出前等一个环的时间，且**只在正常播完时等**——被打断时我们本来就要丢：
+
+```cpp
+if (!stop_requested_) drain_output();   // 90ms + 20ms 余量
+AudioCodec_EnableOutput(codec_, false);
+```
+
+这同时让 T3.3 上报的数字诚实了：正常播完时确实排空了，`played == written` 才成立；
+在加这个修复之前，"正常播完 = 全部听到"这个假设本身是错的。
+
+**这是"单一指标看起来正常不等于系统正常"的又一例**：播放返回 `done`、时长也对得上
+（90ms 在 27 秒里看不出来），单看播放结果永远发现不了。是为了给 `spk_buffer_ms`
+定一个合理区间才去翻 DMA 配置，才撞上的。
 
 ## 本地构建的一个坑（不是本次改动引入的）
 

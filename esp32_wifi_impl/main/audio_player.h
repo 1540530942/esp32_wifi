@@ -76,6 +76,9 @@ private:
     // and WAV-header parse in between would otherwise be counted as elapsed
     // playback and make the buffer estimate read low for the first second.
     void note_samples_written(int samples);
+    // Let the I2S DMA ring play out before the output is closed (closing
+    // discards it). Only on a normal finish -- a barge-in wants it discarded.
+    void drain_output() const;
     esp_err_t play_wav_stream(const std::string& url, uint8_t volume_percent);
     esp_err_t play_wav_stream_raw_http(const std::string& url, uint8_t volume_percent);
     esp_err_t play_pcm_stream_websocket(const std::string& url, uint8_t volume_percent,
