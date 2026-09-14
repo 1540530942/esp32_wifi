@@ -74,6 +74,24 @@ static volatile int     s_click_latency_ms = -1;
 // It also degrades gracefully: with nothing playing peak_ref ~= 0, the
 // denominator floors at 1 and the test becomes the plain ch0-level one, so
 // there is no separate playing/idle code path.
+// --- Early barge-in on the raw mic (pre-AFE) --------------------------------
+// E4 measured 305 and 319 ms against a 200 ms budget. The breakdown: ~10 ms
+// from click to speech onset, 64 ms for the four sustained VAD frames, 24 ms to
+// stop the output (T3.2, measured) -- and roughly 210 ms inside the AFE before
+// its VAD ever reports speech. The task list budgeted 50 ms for "AFE + VAD",
+// so that single term is the whole overrun, and no amount of tuning the frame
+// count recovers it.
+//
+// The click detector already answers the question barge-in needs, one frame
+// after the sound arrives: ch0 rose without ch1 rising, so the source is not
+// the robot. Requiring that for a few consecutive frames turns a transient
+// detector into a speech-onset detector, and it runs in the feed task, before
+// the AFE, so none of that 210 ms is in the path.
+//
+// The AFE VAD path stays as it was. This one only ever fires earlier, and a
+// door slam still has to clear the same sustained requirement.
+static uint32_t s_early_run = 0;
+static bool s_early_fired = false;
 static float s_click_env_ratio = 0.0f;
 static int16_t s_click_prev_ref = 0;   // previous frame's ch1 peak (see below)
 static uint32_t s_click_frames = 0;
@@ -159,6 +177,45 @@ static void click_scan(const int16_t *buf, int chunk, int nch, int64_t frame_end
     s_click_frames++;
 }
 
+#if CONFIG_AEC_LOCAL_BARGEIN
+// Same test as click_scan's, run on every frame rather than only while armed,
+// and requiring several frames in a row so a single transient is not enough.
+static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
+{
+    if (nch < 2) return;              // no reference channel, no discriminator
+    int16_t peak = 0, peak_ref = 0;
+    for (int f = 0; f < chunk; f++) {
+        int16_t v = buf[f * nch + 0];
+        int16_t a = v < 0 ? (int16_t)-v : v;
+        if (a > peak) peak = a;
+        int16_t r = buf[f * nch + 1];
+        int16_t ra = r < 0 ? (int16_t)-r : r;
+        if (ra > peak_ref) peak_ref = ra;
+    }
+    const bool playing = playback_is_playing();
+    const bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
+    if (!playing || !past_grace) { s_early_run = 0; s_early_fired = false; return; }
+
+    // External-dominant: ch0 well above what the reference can account for.
+    const bool external = peak > CLICK_MIN_PEAK &&
+                          (float)peak > (float)(peak_ref + 1) * CLICK_TRIGGER_RATIO;
+    if (!external) { s_early_run = 0; return; }
+
+    if (++s_early_run >= CONFIG_AEC_BARGEIN_EARLY_FRAMES && !s_early_fired) {
+        const int64_t duck_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "early barge-in (raw mic) -> duck+stop at t=%lld us", (long long)duck_us);
+        if (s_click_us != 0 && s_click_duck_us == 0) {
+            s_click_duck_us = duck_us;
+            s_click_latency_ms = (int)((duck_us - s_click_us) / 1000);
+            ESP_LOGI(TAG, "E4 barge-in latency = %d ms (click=%lld duck=%lld)",
+                     s_click_latency_ms, (long long)s_click_us, (long long)duck_us);
+        }
+        playback_barge_in();
+        s_early_fired = true;
+    }
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Feed task: ES7210 TDM -> AFE feed
 // ---------------------------------------------------------------------------
@@ -203,6 +260,9 @@ static void feed_task(void *arg)
         }
         int64_t now = esp_timer_get_time();
         if (s_click_armed) click_scan(buf, s_feed_chunksize, s_feed_nch, now);
+#if CONFIG_AEC_LOCAL_BARGEIN
+        early_bargein_scan(buf, s_feed_chunksize, s_feed_nch);
+#endif
         if (now - last_log_us > 3000000) {
             int32_t a0 = 0, a1 = 0;
             for (int f = 0; f < s_feed_chunksize; f++) {
