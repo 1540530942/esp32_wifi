@@ -148,21 +148,57 @@ esp_err_t DeviceHubClient::post_json(const std::string& path, const std::string&
     if (!client) return ESP_ERR_NO_MEM;
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body.data(), (int)body.size());
-    esp_err_t err = esp_http_client_perform(client);
+
+    // Do NOT use esp_http_client_perform() here. It consumes the response body
+    // internally, so a later esp_http_client_read_response() has nothing left
+    // to return -- the reply came back as an empty string every time, and the
+    // command list rides on that reply, so the device silently stopped
+    // receiving commands. open/fetch_headers/read keeps the body available.
+    //
+    // This was latent for a long time: TLS allocation had been failing, so this
+    // branch never completed and everything went through the plain-HTTP
+    // fallback below, which hand-parses the socket and works. Fixing TLS made
+    // HTTPS preferred again and exposed it.
+    esp_err_t err = esp_http_client_open(client, (int)body.size());
     if (err == ESP_OK) {
-        int status = esp_http_client_get_status_code(client);
+        int written = body.empty() ? 0
+            : esp_http_client_write(client, body.data(), (int)body.size());
+        if (written < (int)body.size()) {
+            ESP_LOGW(TAG, "POST %s short write %d/%u", path.c_str(), written,
+                     (unsigned)body.size());
+            err = ESP_FAIL;
+        }
+    }
+    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0) {
+        ESP_LOGW(TAG, "POST %s fetch_headers failed", path.c_str());
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        const int status = esp_http_client_get_status_code(client);
         if (status < 200 || status >= 300) {
             ESP_LOGW(TAG, "POST %s returned HTTP %d", path.c_str(), status);
             err = ESP_FAIL;
-        } else if (response) {
-            int length = (int)esp_http_client_get_content_length(client);
-            if (length > 0 && length < 16384) {
-                response->resize(length);
-                int read = esp_http_client_read_response(client, response->data(), length);
-                if (read >= 0) response->resize((size_t)read);
-            } else {
-                response->clear();
+        } else {
+            // Read until the peer is done rather than trusting Content-Length:
+            // it is -1 on a chunked reply, and that used to take the silent
+            // "clear the response" path.
+            std::string sink;
+            char buf[512];
+            for (;;) {
+                const int n = esp_http_client_read(client, buf, sizeof(buf));
+                if (n <= 0) break;
+                sink.append(buf, (size_t)n);
+                if (sink.size() > 16384) break;
+            }
+            if (response) *response = sink;
+            // A 2xx with no body is not success for this API -- every endpoint
+            // answers with JSON. Treat it as a failure so the plain-HTTP
+            // fallback still gets its turn instead of the caller quietly
+            // reading an empty reply, which is exactly how this went unnoticed.
+            if (sink.empty()) {
+                ESP_LOGW(TAG, "POST %s returned HTTP %d with an empty body",
+                         path.c_str(), status);
+                err = ESP_FAIL;
             }
         }
     }
