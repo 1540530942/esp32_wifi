@@ -52,8 +52,14 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
 对底噪 17.5，只高 2.7 dB，两路 ASR 都是空）。恢复后先确认**音量和摆位**能让人声
 明显高出底噪，否则 E2b/E3 测的都是噪声。
 
-**E4 还缺的东西**：素材开头的 20ms 咔哒声还没做。ESP32 侧的时间戳埋点已就位——
-`afe_pipeline.c` 在打断触发时打印 `local barge-in -> duck+stop at t=<微秒>`，
+**E4 的前置工作已全部完成**（见 `e4-click-instrumentation`）。此处原先写的"ESP32 侧
+时间戳埋点已就位"是错的：`t_duck` 有埋点，但**"人开口"那一半 `t_click` 当时根本没有
+实现**，E4 并不是"等树莓派回来就能跑"。现已补上：
+
+- 原始麦克风通道（AFE 之前）的咔哒检测 + 帧内定位，一次性触发
+- `click_arm` / `click_result` 两条命令，延迟可远程读出，不是只打串口
+- 5 个 `_click` 素材已在 spark 生成（`make_click_fixtures.py`）
+
 两个时间戳都取自设备自己的时钟，不需要跨设备对时。
 
 ## 这次工作里三个不在原清单、但直接卡着目标的发现

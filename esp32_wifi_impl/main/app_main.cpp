@@ -863,6 +863,28 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         const std::string regs = read_es7210_gain_regs(player);
         return regs.rfind("failed", 0) == 0 ? regs : "done|" + regs;
     }
+    if (cmd.action == "click_arm") {
+        // E4: arm the raw-mic onset detector, then tell the Pi to play a
+        // click-prefixed fixture. Arming is cheap and does not touch playback.
+        afe_click_arm();
+        return "done|armed";
+    }
+    if (cmd.action == "click_result") {
+        int64_t click_us = 0, duck_us = 0;
+        int latency_ms = -1;
+        if (!afe_click_result(&click_us, &duck_us, &latency_ms)) {
+            return "done|no click detected since arming";
+        }
+        char out[160];
+        if (latency_ms < 0) {
+            snprintf(out, sizeof(out), "done|click=%lld us, no barge-in yet",
+                     (long long)click_us);
+        } else {
+            snprintf(out, sizeof(out), "done|latency=%d ms click=%lld duck=%lld",
+                     latency_ms, (long long)click_us, (long long)duck_us);
+        }
+        return std::string(out);
+    }
     if (cmd.action == "aec_probe") {
         if (player->is_playing()) return "failed|busy";
         esp_err_t err = player->run_aec_reference_probe();

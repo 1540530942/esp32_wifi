@@ -3,6 +3,7 @@
 // mono PCM for uplink. Also drives on-device (level-1) barge-in.
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -38,3 +39,24 @@ void afe_config_summary(char *buf, size_t n);
 
 void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples);
 void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
+
+// --- E4 barge-in latency ----------------------------------------------------
+// E4 measures "user opens their mouth -> playback stops". The stop side was
+// already timestamped in the fetch task; this is the other half: a sharp onset
+// (the 20 ms click prepended to the Raspberry Pi's fixture) detected in the RAW
+// microphone channel, before the AFE, so it is not delayed by AEC/VAD.
+//
+// Both timestamps come from this device's own esp_timer clock, so no
+// cross-device sync is needed -- that is the whole reason the click exists
+// rather than timing the Pi's aplay start.
+//
+// Arm immediately before telling the Pi to play. Detection is one-shot: the
+// first qualifying onset records the timestamp and disarms, so the rest of the
+// utterance cannot overwrite it.
+void afe_click_arm(void);
+
+// Reads back the last armed measurement. Returns false when no click has been
+// detected since the last arm. `latency_ms` is -1 until the barge-in fires.
+// Exposed as a command reply rather than only a UART log, because a value that
+// only reaches the serial console cannot be verified on a headless board.
+bool afe_click_result(int64_t *click_us, int64_t *duck_us, int *latency_ms);

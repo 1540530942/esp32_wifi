@@ -45,6 +45,73 @@ static volatile bool s_cap_on = false;
 static StreamBufferHandle_t s_ref_ring;   // mono int16 reference samples
 #endif
 
+// --- E4 click onset detection (see afe_pipeline.h) --------------------------
+// Runs on the RAW mic channel inside the feed task, i.e. before the AFE, so the
+// measured onset is not itself delayed by AEC/NS/VAD -- otherwise the latency
+// under test would be partly subtracted from the measurement.
+static volatile bool    s_click_armed = false;
+static volatile int64_t s_click_us = 0;   // 0 = nothing detected since arming
+static volatile int64_t s_click_duck_us = 0;
+static volatile int     s_click_latency_ms = -1;
+// Slow envelope of the per-frame peak. The threshold is relative to it because
+// during E4 the ESP32 is playing: the raw mic already carries the robot's own
+// echo, so any fixed absolute threshold would either miss the click at low
+// volume or fire on the echo at high volume.
+static float s_click_env = 0.0f;
+static uint32_t s_click_frames = 0;
+#define CLICK_ENV_ALPHA      0.05f   // ~20 frames (~320 ms) time constant
+#define CLICK_TRIGGER_RATIO  4.0f    // +12 dB over the running envelope
+#define CLICK_MIN_PEAK       2000    // absolute floor, keeps silence from firing
+#define CLICK_SEED_FRAMES    16      // let the envelope settle before arming fires
+
+void afe_click_arm(void)
+{
+    s_click_us = 0;
+    s_click_duck_us = 0;
+    s_click_latency_ms = -1;
+    s_click_env = 0.0f;
+    s_click_frames = 0;
+    s_click_armed = true;
+    ESP_LOGI(TAG, "click detector armed at t=%lld us", (long long)esp_timer_get_time());
+}
+
+bool afe_click_result(int64_t *click_us, int64_t *duck_us, int *latency_ms)
+{
+    if (click_us) *click_us = s_click_us;
+    if (duck_us) *duck_us = s_click_duck_us;
+    if (latency_ms) *latency_ms = s_click_latency_ms;
+    return s_click_us != 0;
+}
+
+// Scans one feed frame for the first sample crossing the trigger, and converts
+// its position inside the frame back to a timestamp. Without the sub-frame
+// offset the measurement would quantise to the feed period (~16 ms at 16 kHz),
+// which is a tenth of the 200 ms budget under test.
+static void click_scan(const int16_t *buf, int chunk, int nch, int64_t frame_end_us)
+{
+    int16_t peak = 0;
+    int first = -1;
+    const float thr_rel = s_click_env * CLICK_TRIGGER_RATIO;
+    const float thr = thr_rel > (float)CLICK_MIN_PEAK ? thr_rel : (float)CLICK_MIN_PEAK;
+    for (int f = 0; f < chunk; f++) {
+        int16_t v = buf[f * nch + 0];
+        int16_t a = v < 0 ? (int16_t)-v : v;
+        if (a > peak) peak = a;
+        if (first < 0 && s_click_frames >= CLICK_SEED_FRAMES && (float)a > thr) first = f;
+    }
+    if (first >= 0 && s_click_us == 0) {
+        // frame_end_us is when the whole frame had been read, so the sample at
+        // index `first` happened (chunk - first) samples earlier.
+        s_click_us = frame_end_us - (int64_t)(chunk - first) * 1000000 / 16000;
+        s_click_armed = false;
+        ESP_LOGI(TAG, "click onset at t=%lld us (peak=%d thr=%d env=%d)",
+                 (long long)s_click_us, (int)peak, (int)thr, (int)s_click_env);
+        return;
+    }
+    s_click_env = s_click_env * (1.0f - CLICK_ENV_ALPHA) + (float)peak * CLICK_ENV_ALPHA;
+    s_click_frames++;
+}
+
 // ---------------------------------------------------------------------------
 // Feed task: ES7210 TDM -> AFE feed
 // ---------------------------------------------------------------------------
@@ -88,6 +155,7 @@ static void feed_task(void *arg)
             s_acc_mic += am; s_acc_ref += ar; s_n_in += s_feed_chunksize;
         }
         int64_t now = esp_timer_get_time();
+        if (s_click_armed) click_scan(buf, s_feed_chunksize, s_feed_nch, now);
         if (now - last_log_us > 3000000) {
             int32_t a0 = 0, a1 = 0;
             for (int f = 0; f < s_feed_chunksize; f++) {
@@ -178,8 +246,16 @@ static void fetch_task(void *arg)
             if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked) {
                 // Timestamp in the device's own clock so barge-in latency can be
                 // measured without cross-device sync (E4).
-                ESP_LOGI(TAG, "local barge-in -> duck+stop at t=%lld us",
-                         (long long)esp_timer_get_time());
+                const int64_t duck_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "local barge-in -> duck+stop at t=%lld us", (long long)duck_us);
+                // E4: pair this with the raw-mic click onset. Only meaningful
+                // when a click was armed and seen for this turn.
+                if (s_click_us != 0 && s_click_duck_us == 0) {
+                    s_click_duck_us = duck_us;
+                    s_click_latency_ms = (int)((duck_us - s_click_us) / 1000);
+                    ESP_LOGI(TAG, "E4 barge-in latency = %d ms (click=%lld duck=%lld)",
+                             s_click_latency_ms, (long long)s_click_us, (long long)duck_us);
+                }
                 playback_barge_in();
                 ducked = true;
             }
