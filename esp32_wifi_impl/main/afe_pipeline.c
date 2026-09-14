@@ -53,16 +53,30 @@ static volatile bool    s_click_armed = false;
 static volatile int64_t s_click_us = 0;   // 0 = nothing detected since arming
 static volatile int64_t s_click_duck_us = 0;
 static volatile int     s_click_latency_ms = -1;
-// Slow envelope of the per-frame peak. The threshold is relative to it because
-// during E4 the ESP32 is playing: the raw mic already carries the robot's own
-// echo, so any fixed absolute threshold would either miss the click at low
-// volume or fire on the echo at high volume.
-static float s_click_env = 0.0f;
+// Slow envelope of the per-frame peak, kept for BOTH channels. The threshold is
+// relative to it because during E4 the ESP32 is playing: the raw mic already
+// carries the robot's own echo, so any fixed absolute threshold would either
+// miss the click at low volume or fire on the echo at high volume.
+//
+// A level ratio on ch0 alone is NOT enough, and the first hardware run proved
+// it: armed mid-playback the detector fired within 280 ms on the robot's own
+// speech. Speech is strongly non-stationary, so a syllable onset clears a
+// 320 ms running envelope by 12 dB just as easily as a click does.
+//
+// What separates them is ch1, the ES7210 hardware reference -- an electrical tap
+// on the amplifier output, not an acoustic pickup (measured in the P1 work: it
+// drops to -84 dBFS with nothing playing while ch0 still sees -52 dBFS of room
+// noise). So the robot's own onsets appear on BOTH channels, and only an
+// external sound appears on ch0 alone. That is the discriminator, and it costs
+// one extra peak per frame.
+static float s_click_env = 0.0f;     // ch0, microphone
+static float s_click_env_ref = 0.0f; // ch1, hardware reference
 static uint32_t s_click_frames = 0;
 #define CLICK_ENV_ALPHA      0.05f   // ~20 frames (~320 ms) time constant
-#define CLICK_TRIGGER_RATIO  4.0f    // +12 dB over the running envelope
+#define CLICK_TRIGGER_RATIO  4.0f    // ch0 must clear its envelope by +12 dB
+#define CLICK_REF_QUIET_RATIO 2.0f   // ...while ch1 stays within +6 dB of its own
 #define CLICK_MIN_PEAK       2000    // absolute floor, keeps silence from firing
-#define CLICK_SEED_FRAMES    16      // let the envelope settle before arming fires
+#define CLICK_SEED_FRAMES    16      // let the envelopes settle before arming fires
 
 void afe_click_arm(void)
 {
@@ -70,6 +84,7 @@ void afe_click_arm(void)
     s_click_duck_us = 0;
     s_click_latency_ms = -1;
     s_click_env = 0.0f;
+    s_click_env_ref = 0.0f;
     s_click_frames = 0;
     s_click_armed = true;
     ESP_LOGI(TAG, "click detector armed at t=%lld us", (long long)esp_timer_get_time());
@@ -89,7 +104,7 @@ bool afe_click_result(int64_t *click_us, int64_t *duck_us, int *latency_ms)
 // which is a tenth of the 200 ms budget under test.
 static void click_scan(const int16_t *buf, int chunk, int nch, int64_t frame_end_us)
 {
-    int16_t peak = 0;
+    int16_t peak = 0, peak_ref = 0;
     int first = -1;
     const float thr_rel = s_click_env * CLICK_TRIGGER_RATIO;
     const float thr = thr_rel > (float)CLICK_MIN_PEAK ? thr_rel : (float)CLICK_MIN_PEAK;
@@ -97,18 +112,34 @@ static void click_scan(const int16_t *buf, int chunk, int nch, int64_t frame_end
         int16_t v = buf[f * nch + 0];
         int16_t a = v < 0 ? (int16_t)-v : v;
         if (a > peak) peak = a;
+        int16_t r = nch > 1 ? buf[f * nch + 1] : 0;
+        int16_t ra = r < 0 ? (int16_t)-r : r;
+        if (ra > peak_ref) peak_ref = ra;
         if (first < 0 && s_click_frames >= CLICK_SEED_FRAMES && (float)a > thr) first = f;
+    }
+    // The robot's own onsets light up the reference tap in the same frame; an
+    // external click does not. Reject the frame if ch1 jumped too. Without a
+    // reference channel (nch == 1) there is nothing to gate on and the ch0 test
+    // stands alone -- which is the configuration that misfires, so say so.
+    const bool ref_quiet =
+        nch < 2 || (float)peak_ref <= s_click_env_ref * CLICK_REF_QUIET_RATIO + (float)CLICK_MIN_PEAK;
+    if (first >= 0 && !ref_quiet) {
+        ESP_LOGD(TAG, "click candidate rejected: ref channel moved too (peak_ref=%d env_ref=%d)",
+                 (int)peak_ref, (int)s_click_env_ref);
+        first = -1;
     }
     if (first >= 0 && s_click_us == 0) {
         // frame_end_us is when the whole frame had been read, so the sample at
         // index `first` happened (chunk - first) samples earlier.
         s_click_us = frame_end_us - (int64_t)(chunk - first) * 1000000 / 16000;
         s_click_armed = false;
-        ESP_LOGI(TAG, "click onset at t=%lld us (peak=%d thr=%d env=%d)",
-                 (long long)s_click_us, (int)peak, (int)thr, (int)s_click_env);
+        ESP_LOGI(TAG, "click onset at t=%lld us (peak=%d thr=%d env=%d ref_peak=%d ref_env=%d)",
+                 (long long)s_click_us, (int)peak, (int)thr, (int)s_click_env,
+                 (int)peak_ref, (int)s_click_env_ref);
         return;
     }
     s_click_env = s_click_env * (1.0f - CLICK_ENV_ALPHA) + (float)peak * CLICK_ENV_ALPHA;
+    s_click_env_ref = s_click_env_ref * (1.0f - CLICK_ENV_ALPHA) + (float)peak_ref * CLICK_ENV_ALPHA;
     s_click_frames++;
 }
 
