@@ -45,6 +45,29 @@ def click_samples(frame_rate: int, amplitude: float = 0.9) -> bytes:
     return bytes(out)
 
 
+LEAD_GUARD_MS = 10
+ONSET_THRESHOLD = 800
+
+
+def trim_leading_silence(frames: bytes, rate: int) -> tuple[bytes, float]:
+    """Drop the quiet run before speech starts, keeping a 10 ms guard.
+
+    E4 measures click -> playback-stop and reads that as "mouth opens ->
+    silence". That only holds if the click sits where speech actually begins.
+    turn05_user.wav opens with 95 ms of silence, which landed in the measured
+    latency as if the system had spent it: the first run read 218 ms against a
+    200 ms limit, of which 115 ms was the click plus that silence. Trimming
+    makes the number mean what the spec says it means, rather than leaving a
+    correction to be applied by hand and forgotten.
+    """
+    count = len(frames) // 2
+    samples = struct.unpack(f"<{count}h", frames)
+    onset = next((i for i, v in enumerate(samples) if abs(v) > ONSET_THRESHOLD), 0)
+    guard = int(rate * LEAD_GUARD_MS / 1000)
+    start = max(0, onset - guard)
+    return frames[start * 2:], start / rate
+
+
 def prepend(src: Path, dst: Path) -> tuple[float, float]:
     with contextlib.closing(wave.open(str(src), "rb")) as r:
         if r.getnchannels() != 1 or r.getsampwidth() != 2:
@@ -53,6 +76,9 @@ def prepend(src: Path, dst: Path) -> tuple[float, float]:
         rate = r.getframerate()
         frames = r.readframes(r.getnframes())
         original_s = r.getnframes() / rate
+    frames, trimmed_s = trim_leading_silence(frames, rate)
+    if trimmed_s > 0.001:
+        print(f"  {src.name}: trimmed {trimmed_s * 1000:.0f} ms of leading silence")
     head = click_samples(rate)
     with contextlib.closing(wave.open(str(dst), "wb")) as w:
         w.setnchannels(1)

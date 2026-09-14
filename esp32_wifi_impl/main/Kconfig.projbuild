@@ -71,7 +71,19 @@ config AEC_LOCAL_BARGEIN
 
 config AEC_BARGEIN_ONSET_GRACE_MS
     int "Ignore barge-in for the first N ms of a TTS turn (AEC converge)"
-    default 500
+    default 900
+    help
+      Must clear the AEC's convergence time with margin. E1 measured
+      convergence at 0.4-0.5 s, and the previous 500 ms sat exactly on that
+      boundary: the filter had barely settled when barge-in became eligible,
+      residual echo read as speech, and the robot cut its own utterance off
+      after ~576 ms. That also makes E4 unmeasurable -- by the time a human
+      speaks there is nothing left playing to interrupt.
+
+      Raising this does not cost barge-in latency; it only delays when an
+      interruption becomes possible after the robot starts talking, which is
+      what the grace exists for. Per the task list, the response to a false
+      barge-in is to adjust the VAD gating, not the AEC.
 
 config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"
