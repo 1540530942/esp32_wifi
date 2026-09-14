@@ -209,8 +209,18 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     // reasoning as click_scan, which got this right -- this is the third time
     // in this work that substituting an absolute threshold for the relation
     // between the two channels has failed.
+    // ch1 leads the acoustic path by the speaker-to-mic flight time, so a robot
+    // syllable straddling a frame boundary shows on ch1 in frame N and on ch0
+    // in frame N+1 -- and frame N+1 then looks exactly like an external talker.
+    // click_scan widens the denominator across two frames for this reason;
+    // omitting it here is what produced the false barge-in that failed E5 on
+    // v62, with the robot cutting itself off 1131 ms in. Same omission as v50,
+    // in a second copy of the same test.
     static float s_early_env = 0.0f;
-    const float ratio = (float)peak / ((float)peak_ref + 1.0f);
+    static int16_t s_early_prev_ref = 0;
+    const int16_t ref_win = peak_ref > s_early_prev_ref ? peak_ref : s_early_prev_ref;
+    s_early_prev_ref = peak_ref;
+    const float ratio = (float)peak / ((float)ref_win + 1.0f);
     const bool seeded = s_early_run > 0 || s_early_env > 0.0f;
     const bool external = peak > CLICK_MIN_PEAK && seeded &&
                           ratio > s_early_env * (CONFIG_AEC_BARGEIN_EARLY_RATIO_X10 / 10.0f);
