@@ -480,6 +480,13 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     cfg->agc_init     = false;
     cfg->vad_init     = true;
     cfg->vad_mode     = VAD_MODE_3;
+    // The AFE will not report speech until it has heard this much of it, and
+    // the default is 128 ms. That is the bulk of the ~210 ms that E4 could not
+    // account for: 128 ms here, plus the sustained-frame check above it, plus
+    // pipeline delay and the 24 ms stop, lands at the ~330 ms measured.
+    // T3.1 asks for roughly 48 ms to declare speech; 64 ms is the closest this
+    // knob allows while staying above its 32 ms floor.
+    cfg->vad_min_speech_ms = CONFIG_AEC_VAD_MIN_SPEECH_MS;
     cfg->pcm_config.sample_rate = AEC_SAMPLE_RATE_HZ;
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 #ifdef CONFIG_AEC_ENABLE

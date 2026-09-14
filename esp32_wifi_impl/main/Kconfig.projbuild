@@ -85,9 +85,22 @@ config AEC_BARGEIN_ONSET_GRACE_MS
       what the grace exists for. Per the task list, the response to a false
       barge-in is to adjust the VAD gating, not the AEC.
 
+config AEC_VAD_MIN_SPEECH_MS
+    int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
+    default 64
+    help
+      How much speech the AFE must hear before it reports VAD_SPEECH. The
+      esp-sr default of 128 ms is most of the latency E4 could not account
+      for. T3.1 asks for roughly 48 ms; 64 ms is the closest this allows while
+      staying clear of the 32 ms floor.
+
 config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"
-    default 4
+    default 2
+    help
+      Stacked on top of vad_min_speech_ms, so the real speech-confirmation
+      time is the sum. Dropped from 4 to 2 once vad_min_speech_ms became
+      explicit, to keep the total near what T3.1 asks rather than tripling it.
 
 config AEC_BARGEIN_EARLY_RATIO_X10
     int "Early barge-in: ch0/ch1 ratio rise over its envelope, x10"
@@ -110,7 +123,7 @@ config AEC_BARGEIN_EARLY_RATIO_X10
 
 config AEC_BARGEIN_EARLY_FRAMES
     int "Consecutive raw-mic frames of external sound for the early barge-in"
-    default 8
+    default 9999
     help
       Runs before the AFE, so it costs one feed frame (~16 ms) instead of the
       ~210 ms the AFE takes to report speech through its own VAD. Three frames
@@ -120,6 +133,16 @@ config AEC_BARGEIN_EARLY_FRAMES
       the robot raises both channels together, an external talker raises only
       the microphone. Set to a large number to disable and fall back to the
       AFE VAD path alone.
+
+      DISABLED (9999). tools/aec_bench/early_bargein_sim.py replays the
+      detector over the archived E3 capture, which contains both channels with
+      a real interruption in it, and swept 7 ratios x 4 frame counts: every
+      single combination either fires while the robot alone is talking or never
+      fires at all. None detects the voice. The robot's own speech moves the
+      ch0/ch1 ratio more -- through nonlinearity, room modes and frame skew --
+      than an interrupting voice adds to it, so no threshold separates them on
+      this hardware. Kept in the tree because the sim makes the negative result
+      reproducible, not because it is expected to work.
 
       Raised from 3 to 8 because the ratio test is fooled by speaker
       nonlinearity. ch1 taps the amplifier electrically and stays linear, while
