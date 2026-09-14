@@ -487,6 +487,20 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     // T3.1 asks for roughly 48 ms to declare speech; 64 ms is the closest this
     // knob allows while staying above its 32 ms floor.
     cfg->vad_min_speech_ms = CONFIG_AEC_VAD_MIN_SPEECH_MS;
+    // "If true, the playback will be muted for vad detection" -- esp-sr's own
+    // answer to the problem E5 keeps failing on, and it defaults to false.
+    //
+    // The residual after AEC is the robot's own speech attenuated by 33-51 dB
+    // (E1), so it is still speech-SHAPED. A duration gate cannot separate it
+    // from a person: vad_min_speech_ms at 48 ms cut 5 of 5 turns, at 64 ms cut
+    // 4 of 5, and the cuts land 3-7 s in, nowhere near the onset grace. The
+    // task list says to adjust the VAD threshold and the minimum speech
+    // duration; only the duration half had been touched.
+    //
+    // vad_energy_threshold looks like the other half but is not available
+    // here: it "is only applied when a vad model is used", and vad_model_name
+    // is NULL, so this build runs the WebRTC VAD and that field is ignored.
+    cfg->vad_mute_playback = true;
     cfg->pcm_config.sample_rate = AEC_SAMPLE_RATE_HZ;
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 #ifdef CONFIG_AEC_ENABLE
