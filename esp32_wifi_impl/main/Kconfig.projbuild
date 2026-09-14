@@ -110,7 +110,7 @@ config AEC_BARGEIN_EARLY_RATIO_X10
 
 config AEC_BARGEIN_EARLY_FRAMES
     int "Consecutive raw-mic frames of external sound for the early barge-in"
-    default 3
+    default 8
     help
       Runs before the AFE, so it costs one feed frame (~16 ms) instead of the
       ~210 ms the AFE takes to report speech through its own VAD. Three frames
@@ -120,6 +120,18 @@ config AEC_BARGEIN_EARLY_FRAMES
       the robot raises both channels together, an external talker raises only
       the microphone. Set to a large number to disable and fall back to the
       AFE VAD path alone.
+
+      Raised from 3 to 8 because the ratio test is fooled by speaker
+      nonlinearity. ch1 taps the amplifier electrically and stays linear, while
+      ch0 hears the acoustically distorted version, so a loud passage adds
+      harmonic energy to ch0 that ch1 cannot account for and the ratio jumps.
+      E5 caught this twice at the same point in turn10 (~23.6 s), which is
+      content-driven, not a stray.
+
+      Duration is the discriminator that level cannot be: distortion bursts are
+      brief, a person interrupting keeps talking. Eight frames is 128 ms, and
+      with the 24 ms measured stop that is ~152 ms end to end, still inside the
+      200 ms budget.
 
 config AEC_BARGEIN_SILENCE_FRAMES
     int "Sustained AFE silence frames before un-ducking a false trigger"
