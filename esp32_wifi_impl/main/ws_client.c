@@ -68,8 +68,32 @@ void ws_client_send_audio(const int16_t *pcm, size_t bytes)
             s_send_log_us = now;
         }
     }
-    // Non-blocking-ish: short timeout, drop on backpressure rather than stall AFE.
-    esp_websocket_client_send_bin(s_client, (const char *)pcm, bytes, pdMS_TO_TICKS(50));
+    // Must not block: AFE delivers a frame every ~16 ms, so a 50 ms lock wait
+    // (what this used to use) guarantees a backlog the moment the client's lock
+    // is contended. That is not theoretical -- it filled the AFE feed ring and
+    // starved the heartbeat task, and the console filled with
+    // "Could not lock ws-client within 50 timeout" at ~51 ms intervals, one per
+    // frame, indefinitely. A timeout of 0 drops the frame instead of waiting.
+    //
+    // Back off after repeated failures rather than retrying every frame: while
+    // the lock is held by a stuck write or a reconnect, every attempt is going
+    // to fail, and the attempts themselves are what does the damage.
+    static uint32_t s_fail_run = 0;
+    static int64_t s_backoff_until_us = 0;
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us < s_backoff_until_us) { s_dropped++; return; }
+
+    if (esp_websocket_client_send_bin(s_client, (const char *)pcm, bytes, 0) < 0) {
+        s_dropped++;
+        if (++s_fail_run >= 8) {
+            s_backoff_until_us = now_us + 1000000;   // 1 s
+            ESP_LOGW(TAG, "uplink send failing (%lu in a row); backing off 1s",
+                     (unsigned long)s_fail_run);
+            s_fail_run = 0;
+        }
+    } else {
+        s_fail_run = 0;
+    }
 }
 
 void ws_client_report_tts_state(bool playing)
