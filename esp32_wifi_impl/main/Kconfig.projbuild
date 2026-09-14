@@ -89,6 +89,25 @@ config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"
     default 4
 
+config AEC_BARGEIN_EARLY_RATIO_X10
+    int "Early barge-in: ch0/ch1 ratio rise over its envelope, x10"
+    default 18
+    help
+      Deliberately lower than the click detector's 4.0x, because the two are
+      answering different questions. The click is a full-scale burst and wants
+      specificity; speech onset wants sensitivity.
+
+      The arithmetic says 4.0x cannot work for speech. During double-talk
+      ch0 = echo + voice while ch1 carries only the echo, so the ratio rises
+      from G to G + voice/ref. Clearing 4G would need the interrupting voice to
+      arrive at the microphone three times louder than the robot's own echo,
+      and a person interrupting is usually comparable to it or quieter. v61
+      measured 38 ms once (the click itself tripping it) against 286/301/328 ms
+      the rest of the time, with the AFE path carrying those.
+
+      1.8x means the voice needs to be about 80% of the echo level. Raise it if
+      E5 starts seeing false barge-ins; that is the trade this knob makes.
+
 config AEC_BARGEIN_EARLY_FRAMES
     int "Consecutive raw-mic frames of external sound for the early barge-in"
     default 3

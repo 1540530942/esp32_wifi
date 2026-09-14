@@ -213,7 +213,7 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     const float ratio = (float)peak / ((float)peak_ref + 1.0f);
     const bool seeded = s_early_run > 0 || s_early_env > 0.0f;
     const bool external = peak > CLICK_MIN_PEAK && seeded &&
-                          ratio > s_early_env * CLICK_TRIGGER_RATIO;
+                          ratio > s_early_env * (CONFIG_AEC_BARGEIN_EARLY_RATIO_X10 / 10.0f);
     if (!external) {
         s_early_run = 0;
         s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
