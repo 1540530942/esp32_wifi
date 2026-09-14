@@ -87,7 +87,7 @@ static float s_click_env_ratio = 0.0f;
 static int16_t s_click_prev_ref = 0;   // previous frame's ch1 peak (see below)
 static uint32_t s_click_frames = 0;
 #define CLICK_ENV_ALPHA      0.05f   // ~20 frames (~320 ms) time constant
-#define CLICK_TRIGGER_RATIO  4.0f    // ch0/ch1 must clear its envelope by +12 dB
+#define CLICK_TRIGGER_RATIO  (CONFIG_AEC_CLICK_TRIGGER_RATIO_X10 / 10.0f)
 #define CLICK_MIN_PEAK       2000    // absolute floor, keeps silence from firing
 #define CLICK_SEED_FRAMES    16      // let the envelope settle before arming fires
 

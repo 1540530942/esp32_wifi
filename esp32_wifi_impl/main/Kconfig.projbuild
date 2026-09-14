@@ -85,6 +85,23 @@ config AEC_DUCK_VOLUME_PCT
     int "Ducked volume (percent of normal) on local barge-in"
     default 25
 
+config AEC_CLICK_TRIGGER_RATIO_X10
+    int "E4 click detector: ch0/ch1 ratio rise over its envelope, x10"
+    default 40
+    help
+      40 means the ratio peak0/peak_ref must reach 4.0x its running envelope
+      (+12 dB) for a frame to count as an external onset rather than the
+      robot's own echo. The ratio is the discriminator because the echo path
+      gain is roughly fixed: the robot's syllables raise both channels and
+      leave the ratio flat, while an external click raises only ch0.
+
+      Exposed as config so the detection path can be proven alive without the
+      Raspberry Pi. Lowering it far enough makes the robot's own speech trip
+      the detector, which is the only positive control available with no
+      external sound source -- a value that never fires passes every negative
+      test, including one where the detector is broken. Put it back to 40
+      afterwards.
+
 config AEC_ENABLE
     bool "Enable AFE acoustic echo cancellation (off = pass-through, for A/B)"
     default y
