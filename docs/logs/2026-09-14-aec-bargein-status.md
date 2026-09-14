@@ -21,6 +21,7 @@
 | **E5** 误打断率 | 0 次 / 127s | **0 次，0 段被切断** | e5-shared-state |
 | **P3** 打断接入生产路径 | —— | 已实现，经两轮回归修复 | p3-bargein |
 | **T3.3** 播放位置回报 | 心跳上报 spk_buffer_ms | buf 0–75ms（上限 90）；播完 37920ms 与素材逐毫秒吻合；打断后冻结在 10632ms | t33-position |
+| **E4 前置** t_click 检测器 | 回声不误触发、真信号能触发 | 负向 v50 不触发 / 正向 v51(降阈值)触发 | e4-click |
 
 ## 未完成（硬件阻塞）
 
@@ -45,7 +46,11 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
     --pi-play turn05_user.wav --pi-volume 100 --pi-delay 10
 # 验收：clean_aec 的 ASR 里能不能读出 turn05 的内容
 
-# E4 打断延迟：需要先在树莓派素材开头插 20ms 咔哒声
+# E4 打断延迟：素材和埋点都已就绪（见 e4-click-instrumentation 末尾的四步）
+#   1. scp turn05_user_click.wav 到树莓派
+#   2. ESP32 播 turn04（vol80）
+#   3. 过了 500ms onset grace 后 click_arm，再让树莓派播 click 素材
+#   4. click_result 读 latency（<200ms 及格，<120ms 好）
 ```
 
 **E2b 的前置坑**：第一次尝试时树莓派的声音根本没到达 ESP32 麦克风（`pre_rms` 24.0
@@ -62,7 +67,7 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
 
 两个时间戳都取自设备自己的时钟，不需要跨设备对时。
 
-## 这次工作里三个不在原清单、但直接卡着目标的发现
+## 这次工作里四个不在原清单、但直接卡着目标的发现
 
 1. **打断从来没有接进生产播放路径**（`p3-bargein`）。检测器门控在
    `playback_is_playing()` 上，而它只反映 TTS 分句队列；机器人真正说话走的
@@ -77,15 +82,15 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
 3. **P1 的预设方向被实测推翻**（`p1-gain`）。ch1 的 0 dB 不是漏设 bug，而是电气
    抽头的合理值。顺带发现真正的电平风险在 vol100——两路都在削顶边缘 4 dB 以内。
 
-另外修掉两个基础设施问题：命令回执被 20 字符上限截断导致所有诊断结果静默丢失
-（`p0-prereqs`）；`play_local_audio` 技能因"已部署未提交"被一次常规重部署抹掉
-（`p3-bargein` 末尾）。
-
 4. **每段话结尾被吃掉 90ms**（`t33-position`）。`i2s_channel_disable()` 是丢弃 DMA
    环而非排空，三条播放路径都在最后一次写入返回后立刻关输出。是为了给
    `spk_buffer_ms` 定量级才去翻 DMA 配置撞上的，播放结果永远返回 `done`、时长也对
    得上，单看播放本身发现不了。已修（只在正常播完时排空，被打断时照旧丢弃），
    但**这个修复本身还没有实测**。
+
+另外修掉两个基础设施问题：命令回执被 20 字符上限截断导致所有诊断结果静默丢失
+（`p0-prereqs`）；`play_local_audio` 技能因"已部署未提交"被一次常规重部署抹掉
+（`p3-bargein` 末尾）。
 
 ## 一条方法上的教训
 
@@ -93,15 +98,20 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
 
 - E5 的误触发计数三轮都是 0 → 实际藏着两层回归
 - 保持原值不变去读寄存器 → 无法区分"配置生效"和"代码根本没跑"
+- E4 咔哒检测器连续两版被自己的回声误触发 → 只验证"该成功时成功"根本发现不了
+- 而"负向全过"本身也不够 → **一个永远不触发的检测器同样全过**
 
-两次都是靠**加一个独立的、与主指标不相关的校验**才看见问题。
+前两次靠**加一个独立的、与主指标不相关的校验**才看见问题。E4 这次补上了缺的另一半：
+**既要有"应该失败的场景确实失败"，也要有"应该成功的场景确实成功"**。做法是把阈值
+做成配置项、临时调到会触发的水平（v51），跑完再调回（v52）——和 P1 那次"必须让
+寄存器变一次"是同一个套路。
 
 ## 产物位置
 
 - 录音归档：`spark:~/workspace/data/aec/bench/<run_id>/`
   （原始三路 + 立体声 + analysis.json，改了参数可横向重算）
 - 台架脚本：`tools/aec_bench/`（`aec_bench.py` / `asr_check.py` /
-  `e5_false_bargein.py` / `ref_level.py` / `make_pink_noise.py`）
+  `e5_false_bargein.py` / `ref_level.py` / `make_pink_noise.py` / `make_click_fixtures.py`）
 - 素材：`spark:~/workspace/data/aec/dialogue_wenyanwen/`（10 段对话原始 24kHz）
   和其 `esp32/` 子目录（5 段 assistant 的 16kHz 转码版 + 粉红噪声）
-- 当前固件：`esp32-wangyutang-v47-drain-tail`
+- 当前固件：`esp32-wangyutang-v52-click-restored`
