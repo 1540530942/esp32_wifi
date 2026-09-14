@@ -86,6 +86,17 @@ private:
     // and WAV-header parse in between would otherwise be counted as elapsed
     // playback and make the buffer estimate read low for the first second.
     void note_samples_written(int samples);
+    // Hands `samples` to the codec in DMA-descriptor-sized pieces, checking
+    // stop_requested_ between them, and returns how many were actually written.
+    //
+    // A single AudioCodec_OutputData() of a whole 8 KB read buffer is 4096
+    // samples = 256 ms of audio, and it blocks until all of it has been queued
+    // into a ring that only holds 90 ms -- so the stop flag was only tested
+    // about every 256 ms and the speaker kept playing until then. Measured at
+    // 143 ms and 159 ms on v54. T3.2 asks for the stop to be immediate, and
+    // E4's t_duck cannot see this delay because it marks the decision, not the
+    // silence.
+    int write_interruptible(const int16_t* data, int samples);
     // Let the I2S DMA ring play out before the output is closed (closing
     // discards it). Only on a normal finish -- a barge-in wants it discarded.
     void drain_output() const;

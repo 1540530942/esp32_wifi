@@ -139,6 +139,23 @@ void AudioPlayer::drain_output() const {
                                  / AUDIO_OUTPUT_SAMPLE_RATE + 20));
 }
 
+int AudioPlayer::write_interruptible(const int16_t* data, int samples) {
+    // One DMA descriptor per piece: the write blocks until a descriptor frees
+    // up anyway, so this is the smallest granularity that costs nothing extra.
+    constexpr int kChunk = AUDIO_CODEC_DMA_FRAME_NUM;
+    int done = 0;
+    while (done < samples) {
+        if (stop_requested_) break;
+        const int n = std::min(kChunk, samples - done);
+        const int w = AudioCodec_OutputData(codec_, const_cast<int16_t*>(data + done), n);
+        if (w <= 0) break;
+        note_samples_written(w);
+        done += w;
+        if (w != n) break;
+    }
+    return done;
+}
+
 void AudioPlayer::note_samples_written(int samples) {
     if (samples <= 0) return;
     int64_t expected = 0;
@@ -330,10 +347,9 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
         const int samples = static_cast<int>(pcm_bytes / 2);
         const int64_t write_started_us = esp_timer_get_time();
         const int written = samples > 0
-            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
+            ? write_interruptible(reinterpret_cast<int16_t*>(input), samples)
             : 0;
         output_write_us += esp_timer_get_time() - write_started_us;
-        note_samples_written(written);
         if (written != samples) ESP_LOGW(TAG, "PCM short write requested=%d written=%d", samples, written);
         total_bytes += static_cast<size_t>(read_result);
     }
@@ -425,10 +441,9 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
         }
         const int samples = static_cast<int>(pcm_bytes / 2);
         const int written = samples > 0
-            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
+            ? write_interruptible(reinterpret_cast<int16_t*>(input), samples)
             : 0;
-        note_samples_written(written);
-        if (written != samples) {
+        if (written != samples && !stop_requested_) {
             ESP_LOGW(TAG, "I2S/codec short write requested=%d written=%d", samples, written);
         }
         vTaskDelay(1);
@@ -688,10 +703,9 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
         }
         const size_t samples = pcm_bytes / 2;
         const int written = samples > 0
-            ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(pcm_buffer), samples)
+            ? write_interruptible(reinterpret_cast<int16_t*>(pcm_buffer), static_cast<int>(samples))
             : 0;
-        note_samples_written(written);
-        if (written != static_cast<int>(samples)) {
+        if (written != static_cast<int>(samples) && !stop_requested_) {
             ESP_LOGW(TAG, "I2S/codec short write requested=%u written=%d",
                      static_cast<unsigned>(samples), written);
         }
