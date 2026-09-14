@@ -121,14 +121,62 @@ AudioCodec_EnableOutput(codec_, false);
 链接失败发生在它们之后。**发布仍然只走 CI**，不要试图靠升级本机 IDF 去"修"这个
 报错，也不要因为本机构建红了就以为改动有问题。
 
+## 硬件实测（v47,2026-09-14 08:53）
+
+固件 `esp32-wangyutang-v47-drain-tail`,OTA job `ota-fb72ce4692ce` 状态 `verified`。
+
+### 正常播完:`play_lan_audio` 播 turn10(37.92s,vol60)
+
+```
+08:53:29 playing=True  buf=16  played=2186
+08:53:34 playing=True  buf=46  played=7376
+08:53:40 playing=True  buf=74  played=12568
+08:53:46 playing=True  buf=0   played=17682
+08:53:52 playing=True  buf=75  played=23007
+08:53:57 playing=True  buf=0   played=28122
+08:54:02 playing=True  buf=0   played=33342
+08:54:07 playing=False buf=0   played=37920   ← 冻结
+```
+
+三条都成立:
+
+1. **`buf` 落在 0–75ms,从未超过 90ms 的理论上限**。这是独立于实现的校验——上限由
+   DMA 环深度决定,如果估计逻辑的时钟起点选错了,这个数会跑飞。
+2. **`played` 单调增长,每 ~5.2s 采样增加 ~5.1–5.3s**,与真实时间同步。
+3. **结束时正好 37920ms,与 turn10 的 37.92s 逐毫秒吻合**。这一条最有说服力:它不是
+   "看起来合理",是一个有独立正确答案的数,对上了。
+
+### 被打断:播到 ~10.6s 时发 `stop_audio`
+
+```
+播放中     playing=True   played=5076
+stop 之后  playing=False  played=10632   ← 冻结在打断点,不是 37920
+```
+
+**这就是 T3.3 的核心行为**:被打断的一段回报"听到了多少",不是"发出去了多少"。
+如果冻结成 37920,接 LLM 后模型就会以为自己把 37.92 秒的内容全说完了。
+
+## 没能验证的部分(说清楚,不要当成已验收)
+
+1. **`dropped` 的具体数值没看到**。它只打在 UART(`playback position: written=...
+   played=... dropped=...`),而设备上报到云端的日志缓冲里只有命令回执,没有 ESP_LOGI。
+   远程能证明的是"played 冻结在打断点",不是"丢掉的正好是 ≤90ms 的环内容"。
+2. **90ms 排空修复本身没有在硬件上测到**。想了一下,这次的两个实验都区分不了它:
+   正常播完时 `played == written` 无论有没有排空都成立;而 90ms 的时长差在心跳
+   采样粒度(5s)下根本看不见。这个修复目前**只有代码层面的依据**
+   (`i2s_channel_disable()` 丢弃而非排空),没有实测。
+
+想把这两条补上,最小的办法是心跳再加一个 `spk_written_ms`——那样
+`dropped = written − played` 就可以远程直接读出来。没有现在就做,因为它纯属验证用
+途(真正消费 T3.3 的历史截断只需要 `played`),留作决策点。
+
 ## 现状
 
-- 代码：已提交并推送（`82513ca`），tag `ota-esp32-wangyutang-v46-spk-position` 已推。
-- **尚未在硬件上验证**。等 CI 出镜像后要做的：OTA 到 v46 → 发一次 `play_lan_audio`
-  播长素材 → 播放过程中拉心跳，确认 `spk_buffer_ms` 是几百毫秒的合理值而不是 0 或
-  几万；再发一次 `stop_audio` 打断，确认串口那行 `dropped=` 非 0。
-- 这一项做完后，**P3 三项（T3.1/T3.2/T3.3）全部实现完毕**，ESP32 侧不依赖树莓派的
-  工作就全部做完了。剩下 E2b/E3/E4 纯粹等硬件。
+- 代码：`ee759bb`，tag `ota-esp32-wangyutang-v47-drain-tail`，设备已在跑 v47。
+  （v46 只含 T3.3，CI 也构建成功了，但没有下发——直接合成 v47 一次 OTA。）
+- **T3.3 验收通过**（上面三条实测）；90ms 排空修复**未实测**，只有代码依据。
+- **P3 三项（T3.1/T3.2/T3.3）全部实现完毕**，ESP32 侧不依赖树莓派的工作就全部做完了。
+  剩下 E2b/E3/E4 纯粹等硬件。
 
 ## 留给下一个会话的决策点
 

@@ -20,6 +20,7 @@
 | **E2** 单讲残余 | 无可辨语音 | **AEC 后 ASR 为空** | e1-e2 |
 | **E5** 误打断率 | 0 次 / 127s | **0 次，0 段被切断** | e5-shared-state |
 | **P3** 打断接入生产路径 | —— | 已实现，经两轮回归修复 | p3-bargein |
+| **T3.3** 播放位置回报 | 心跳上报 spk_buffer_ms | buf 0–75ms（上限 90）；播完 37920ms 与素材逐毫秒吻合；打断后冻结在 10632ms | t33-position |
 
 ## 未完成（硬件阻塞）
 
@@ -74,6 +75,12 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
 （`p0-prereqs`）；`play_local_audio` 技能因"已部署未提交"被一次常规重部署抹掉
 （`p3-bargein` 末尾）。
 
+4. **每段话结尾被吃掉 90ms**（`t33-position`）。`i2s_channel_disable()` 是丢弃 DMA
+   环而非排空，三条播放路径都在最后一次写入返回后立刻关输出。是为了给
+   `spk_buffer_ms` 定量级才去翻 DMA 配置撞上的，播放结果永远返回 `done`、时长也对
+   得上，单看播放本身发现不了。已修（只在正常播完时排空，被打断时照旧丢弃），
+   但**这个修复本身还没有实测**。
+
 ## 一条方法上的教训
 
 反复出现、值得单独记：**单一指标"看起来正常"不等于系统正常**。
@@ -91,4 +98,4 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
   `e5_false_bargein.py` / `ref_level.py` / `make_pink_noise.py`）
 - 素材：`spark:~/workspace/data/aec/dialogue_wenyanwen/`（10 段对话原始 24kHz）
   和其 `esp32/` 子目录（5 段 assistant 的 16kHz 转码版 + 粉红噪声）
-- 当前固件：`esp32-wangyutang-v45-pga-restored`
+- 当前固件：`esp32-wangyutang-v47-drain-tail`
