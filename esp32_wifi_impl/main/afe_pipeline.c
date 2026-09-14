@@ -196,10 +196,29 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     const bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
     if (!playing || !past_grace) { s_early_run = 0; s_early_fired = false; return; }
 
-    // External-dominant: ch0 well above what the reference can account for.
-    const bool external = peak > CLICK_MIN_PEAK &&
-                          (float)peak > (float)(peak_ref + 1) * CLICK_TRIGGER_RATIO;
-    if (!external) { s_early_run = 0; return; }
+    // Compare the ch0/ch1 RATIO against its own running value, not ch0 against
+    // a fixed multiple of ch1. The first version did the latter and only fired
+    // when the robot happened to be between syllables: while it is speaking
+    // loudly peak_ref reaches several thousand, so "ch0 > 4 x ch1" demands a
+    // ch0 beyond full scale and can never be true. Measured spread was 30 ms
+    // when it caught a gap and 289 ms when it did not and the AFE path had to
+    // carry it.
+    //
+    // The echo path has a roughly fixed gain, so that running ratio IS the
+    // gain; an external talker is what makes the ratio jump above it. Same
+    // reasoning as click_scan, which got this right -- this is the third time
+    // in this work that substituting an absolute threshold for the relation
+    // between the two channels has failed.
+    static float s_early_env = 0.0f;
+    const float ratio = (float)peak / ((float)peak_ref + 1.0f);
+    const bool seeded = s_early_run > 0 || s_early_env > 0.0f;
+    const bool external = peak > CLICK_MIN_PEAK && seeded &&
+                          ratio > s_early_env * CLICK_TRIGGER_RATIO;
+    if (!external) {
+        s_early_run = 0;
+        s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
+        return;
+    }
 
     if (++s_early_run >= CONFIG_AEC_BARGEIN_EARLY_FRAMES && !s_early_fired) {
         const int64_t duck_us = esp_timer_get_time();

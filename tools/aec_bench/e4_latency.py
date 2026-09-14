@@ -101,8 +101,17 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
 
     arm = post(f"{HUB}/command", {"action": "click_arm"})
     arm_id = arm.get("command_id", "")
-    if not command_ack(arm_id):
+    if not command_ack(arm_id, timeout_s=20):
         result["reason"] = "click_arm never acknowledged"
+        return result
+
+    # Waiting for that acknowledgement can take tens of seconds, and the clip
+    # is finite: six runs were thrown away because the robot had already
+    # finished speaking by the time the Pi opened its mouth, which reads
+    # identically to a barge-in failure. Confirm the robot is still talking
+    # immediately before the interruption, or the run proves nothing.
+    if not device_state().get("audio_playing"):
+        result["reason"] = "clip ended before the interruption (arm ack was slow)"
         return result
 
     post(TASKS, {"action": "play_local_audio", "params": {"name": user},
@@ -129,7 +138,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--assistant", default="turn04_assistant.wav")
+    ap.add_argument("--assistant", default="turn10_assistant.wav")  # 37.92s, the longest
     ap.add_argument("--user", default="turn05_user_click.wav")
     ap.add_argument("--volume", type=int, default=80)
     ap.add_argument("--pi-volume", type=int, default=100)
