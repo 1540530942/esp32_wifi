@@ -97,7 +97,7 @@ config AEC_MIC_PGA_GAIN_DB
 
 config AEC_REF_PGA_GAIN_DB
     int "ES7210 ch1 (hardware AEC reference) PGA gain in dB"
-    default 0
+    default 6
     help
       Written to REG44 after the input is opened. 0 dB is not an oversight,
       it is measured: ch1 taps the amplifier output electrically rather than
