@@ -237,12 +237,30 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     // sustained frames. Deterministic, not a stray echo. So: update always
     // while playing, fire only after the grace and once the envelope has had
     // time to settle.
-    s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
-    if (!past_grace || ++s_early_frames < CLICK_SEED_FRAMES) { s_early_run = 0; return; }
-
+    // Envelope bookkeeping has two requirements that pull against each other,
+    // and each was satisfied alone before being satisfied together:
+    //
+    //   during the grace it MUST update, or it holds a stale value and the
+    //   first eligible frame fires (v62/v63: a false barge-in at 1131 ms);
+    //
+    //   during a candidate run it MUST NOT update, or it climbs toward the
+    //   interruption itself and the ratio stops clearing its own raised
+    //   envelope before the frame count is reached. With a ~320 ms time
+    //   constant the envelope moves about a third in eight frames, which was
+    //   enough to stop the early path firing at all on v65 -- every sample
+    //   came back ~340 ms, the AFE path's figure, in a suspiciously tight
+    //   cluster.
+    //
+    // So: update while the robot alone is talking, freeze once something else
+    // might be.
     const bool external = peak > CLICK_MIN_PEAK &&
                           ratio > s_early_env * (CONFIG_AEC_BARGEIN_EARLY_RATIO_X10 / 10.0f);
-    if (!external) { s_early_run = 0; return; }
+    const bool settling = !past_grace || ++s_early_frames < CLICK_SEED_FRAMES;
+    if (!external || settling) {
+        s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
+        s_early_run = 0;
+        return;
+    }
 
     if (++s_early_run >= CONFIG_AEC_BARGEIN_EARLY_FRAMES && !s_early_fired) {
         const int64_t duck_us = esp_timer_get_time();
