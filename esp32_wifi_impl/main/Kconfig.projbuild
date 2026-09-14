@@ -89,4 +89,24 @@ config AEC_ENABLE
     bool "Enable AFE acoustic echo cancellation (off = pass-through, for A/B)"
     default y
 
+config AEC_MIC_PGA_GAIN_DB
+    int "ES7210 ch0 (microphone) PGA gain in dB"
+    default 30
+    help
+      Written to REG43 after the input is opened. 3 dB steps below 33 dB.
+
+config AEC_REF_PGA_GAIN_DB
+    int "ES7210 ch1 (hardware AEC reference) PGA gain in dB"
+    default 0
+    help
+      Written to REG44 after the input is opened. 0 dB is not an oversight,
+      it is measured: ch1 taps the amplifier output electrically rather than
+      listening acoustically, so at 0 dB it already peaks 9-10 dB hotter than
+      the mic does at 30 dB. Real speech at speaker volume 80 peaks at
+      -9 dBFS on this channel, inside the -12..-6 target, and volume 100
+      already reaches -3.9 dBFS. Raising this would clip long before it would
+      help. Both gains are set explicitly so the value is a decision on
+      record rather than whatever esp_codec_dev_open() happened to leave
+      behind.
+
 endmenu

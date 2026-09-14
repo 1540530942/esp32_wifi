@@ -1,4 +1,5 @@
 #include "box_audio_codec.h"
+#include "sdkconfig.h"
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
@@ -137,7 +138,21 @@ static void box_enable_input(AudioCodec* codec, bool enable) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
         ESP_ERROR_CHECK(esp_codec_dev_open(box->input_dev, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(box->input_dev, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), codec->input_gain));
+        // Set both channels explicitly, and only after open() -- open() runs
+        // _update_codec_setting(), which writes the handle's default gain to
+        // every channel, so anything written earlier is overwritten here.
+        // Previously only ch0 was set, which left ch1 (the AEC reference)
+        // sitting on that default rather than on a chosen value; measuring it
+        // is what turned this from an assumption into a decision. See
+        // CONFIG_AEC_REF_PGA_GAIN_DB for why the reference wants 0 dB.
+        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(
+            box->input_dev, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+            (float)CONFIG_AEC_MIC_PGA_GAIN_DB));
+        if (codec->input_reference) {
+            ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(
+                box->input_dev, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1),
+                (float)CONFIG_AEC_REF_PGA_GAIN_DB));
+        }
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(box->input_dev));
     }
