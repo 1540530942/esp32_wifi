@@ -92,6 +92,7 @@ static volatile int     s_click_latency_ms = -1;
 // door slam still has to clear the same sustained requirement.
 static uint32_t s_early_run = 0;
 static bool s_early_fired = false;
+static uint32_t s_early_frames = 0;
 static float s_click_env_ratio = 0.0f;
 static int16_t s_click_prev_ref = 0;   // previous frame's ch1 peak (see below)
 static uint32_t s_click_frames = 0;
@@ -194,7 +195,14 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     }
     const bool playing = playback_is_playing();
     const bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
-    if (!playing || !past_grace) { s_early_run = 0; s_early_fired = false; return; }
+    if (!playing) {
+        // Idle: ch1 is silent so the ratio is meaningless (peak0 over ~1).
+        // Letting that into the envelope would poison the next utterance.
+        s_early_run = 0;
+        s_early_fired = false;
+        s_early_frames = 0;
+        return;
+    }
 
     // Compare the ch0/ch1 RATIO against its own running value, not ch0 against
     // a fixed multiple of ch1. The first version did the latter and only fired
@@ -221,14 +229,20 @@ static void early_bargein_scan(const int16_t *buf, int chunk, int nch)
     const int16_t ref_win = peak_ref > s_early_prev_ref ? peak_ref : s_early_prev_ref;
     s_early_prev_ref = peak_ref;
     const float ratio = (float)peak / ((float)ref_win + 1.0f);
-    const bool seeded = s_early_run > 0 || s_early_env > 0.0f;
-    const bool external = peak > CLICK_MIN_PEAK && seeded &&
+    // The envelope has to track THIS utterance's echo path, and it can only do
+    // that while the robot is actually speaking. The first version returned
+    // early for the whole grace period, so when the grace expired the envelope
+    // still held a stale value and the very first frames cleared it -- a false
+    // barge-in at 1131 ms, every time, which is 900 ms of grace plus the three
+    // sustained frames. Deterministic, not a stray echo. So: update always
+    // while playing, fire only after the grace and once the envelope has had
+    // time to settle.
+    s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
+    if (!past_grace || ++s_early_frames < CLICK_SEED_FRAMES) { s_early_run = 0; return; }
+
+    const bool external = peak > CLICK_MIN_PEAK &&
                           ratio > s_early_env * (CONFIG_AEC_BARGEIN_EARLY_RATIO_X10 / 10.0f);
-    if (!external) {
-        s_early_run = 0;
-        s_early_env = s_early_env * (1.0f - CLICK_ENV_ALPHA) + ratio * CLICK_ENV_ALPHA;
-        return;
-    }
+    if (!external) { s_early_run = 0; return; }
 
     if (++s_early_run >= CONFIG_AEC_BARGEIN_EARLY_FRAMES && !s_early_fired) {
         const int64_t duck_us = esp_timer_get_time();
