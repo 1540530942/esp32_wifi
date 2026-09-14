@@ -100,12 +100,23 @@ config AEC_BARGEIN_ONSET_GRACE_MS
 
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
-    default 48
+    default 64
     help
       How much speech the AFE must hear before it reports VAD_SPEECH. The
-      esp-sr default of 128 ms is most of the latency E4 could not account
-      for. T3.1 asks for roughly 48 ms; 64 ms is the closest this allows while
-      staying clear of the 32 ms floor.
+      esp-sr default of 128 ms is most of the latency E4 could not account for.
+
+      This is the knob where E4 and E5 meet, and the three points measured so
+      far are:
+
+        128 ms  E5 passes at full 127 s scope, E4 ~330 ms      -- E4 fails
+         64 ms  E4 median 193 ms (2 of 6 over), E5 untested at scope
+         48 ms  E4 median 127 ms, 7 of 7 under; E5 cuts 5 of 5 turns
+
+      At 48 ms the VAD calls residual echo and room noise speech often enough
+      that widening the onset grace does not help: the grace only covers the
+      opening, and the v69 cuts land at 1.4-5.4 s, well past a 1500 ms gate.
+      64 ms is the remaining candidate and has to be shown at full scope on
+      both criteria, not one clip and one metric.
 
 config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"

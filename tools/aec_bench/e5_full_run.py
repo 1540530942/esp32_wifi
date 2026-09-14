@@ -56,6 +56,29 @@ def state():
     return {}
 
 
+def stop_ack_count():
+    """How many stop_audio acknowledgements the device has reported so far.
+
+    e4_latency.py issues a stop_audio after every run, command delivery lags by
+    seconds, and those stops land during whatever is playing next. That is what
+    ruined the first two full-scope E5 runs: five turns cut, one of them at
+    played=0, which no barge-in can produce -- a barge-in has to let some audio
+    out before it stops anything. Six stop_audio acks were sitting in the log
+    against the one this script sends.
+
+    So the run is invalidated if any stop arrives during it, the same way
+    check_robot_still.py invalidates a capture the robot moved during. The
+    difference is that this interference was self-inflicted.
+    """
+    proc = subprocess.run(["curl", "-s", "-m", "20", HUB],
+                          capture_output=True, text=True)
+    try:
+        logs = json.loads(proc.stdout).get("device", {}).get("logs") or []
+    except Exception:
+        return -1
+    return sum(1 for l in logs if "action=stop_audio" in l.get("message", ""))
+
+
 def play_one(name, expected_ms):
     # No stop_audio here. Command delivery lags by seconds, so a stop issued at
     # the top of one turn lands during the next one and kills it: the first
@@ -102,6 +125,11 @@ def main() -> int:
           f"{sum(d for _, d in TURNS) / 1000:.2f}s total, Pi silent\n")
     post(f"{HUB}/command", {"action": "stop_audio"})   # clear the decks once
     time.sleep(12)
+    # Let any stop_audio still in flight from earlier tooling land before the
+    # first turn, then take the baseline.
+    print("  等待残留命令落地 ...")
+    time.sleep(45)
+    stops_before = stop_ack_count()
     cut = 0
     total = 0
     for name, expected in TURNS:
@@ -121,6 +149,11 @@ def main() -> int:
     print()
     if total == 0:
         print("没有有效轮次，无法判定")
+        return 2
+    stops_after = stop_ack_count()
+    if stops_before >= 0 and stops_after > stops_before:
+        print(f"判定无效 —— 运行期间有 {stops_after - stops_before} 条 stop_audio "
+              f"落地（多半来自先前的 e4_latency.py），它们会杀掉播放。重跑。")
         return 2
     print(f"有效轮次 {total}/{len(TURNS)}，被切断 {cut} 次")
     # A verdict needs the duration the criterion names, not whatever fraction of
