@@ -53,36 +53,27 @@ static volatile bool    s_click_armed = false;
 static volatile int64_t s_click_us = 0;   // 0 = nothing detected since arming
 static volatile int64_t s_click_duck_us = 0;
 static volatile int     s_click_latency_ms = -1;
-// Slow envelope of the per-frame peak, kept for BOTH channels. The threshold is
-// relative to it because during E4 the ESP32 is playing: the raw mic already
-// carries the robot's own echo, so any fixed absolute threshold would either
-// miss the click at low volume or fire on the echo at high volume.
+// The quantity tested is the RATIO ch0/ch1 against its own slow envelope --
+// not either channel's level. Two hardware runs established why, and both
+// rejected formulations are worth naming so they are not tried again:
 //
-// A level ratio on ch0 alone is NOT enough, and the first hardware run proved
-// it: armed mid-playback the detector fired within 280 ms on the robot's own
-// speech. Speech is strongly non-stationary, so a syllable onset clears a
-// 320 ms running envelope by 12 dB just as easily as a click does.
+//   v48: "ch0 clears its own envelope by +12 dB". Fired within 280 ms on the
+//        robot's own speech. Speech is strongly non-stationary; a syllable
+//        onset clears a 320 ms envelope exactly as easily as a click does.
+//   v49: "...and reject the frame if ch1 also jumped". Also fired. During
+//        playback ch1 is loud so its envelope is high, and a moderate ch1 rise
+//        still sits within +6 dB of it -- the gate was true almost always.
 //
-// What separates them is ch1, the ES7210 hardware reference -- an electrical tap
-// on the amplifier output, not an acoustic pickup (measured in the P1 work: it
-// drops to -84 dBFS with nothing playing while ch0 still sees -52 dBFS of room
-// noise). So the robot's own onsets appear on BOTH channels, and only an
-// external sound appears on ch0 alone. That is the discriminator, and it costs
-// one extra peak per frame.
-// The quantity actually tested is the RATIO ch0/ch1, not either level.
+// What works: the echo path has a roughly fixed gain G, so peak0 ~= G *
+// peak_ref while the robot is the only source. Its onsets raise BOTH channels
+// and leave the ratio flat; an external click raises only the numerator and the
+// ratio jumps. ch1 can carry this because it is an electrical tap on the
+// amplifier output rather than an acoustic pickup (P1 measured it at -84 dBFS
+// with nothing playing while ch0 still saw -52 dBFS of room noise).
 //
-// Second correction, after v49: "reject the frame if ch1 also jumped" does not
-// work either. During playback ch1 is loud, so its envelope is high, and a
-// moderate ch1 rise still satisfies "within +6 dB of its own envelope" -- the
-// gate was true almost always and the detector still fired on the robot's
-// speech.
-//
-// The echo path has a roughly fixed gain G, so peak0 ~= G * peak_ref while the
-// robot is the only source. A syllable onset raises BOTH, leaving the ratio
-// unchanged; an external click raises only the numerator, so the ratio jumps.
-// Testing the ratio against its own envelope is therefore the discriminator,
-// and it degrades gracefully: with nothing playing peak_ref ~= 0, the
-// denominator floors at 1 and the test becomes the plain ch0-level test.
+// It also degrades gracefully: with nothing playing peak_ref ~= 0, the
+// denominator floors at 1 and the test becomes the plain ch0-level one, so
+// there is no separate playing/idle code path.
 static float s_click_env_ratio = 0.0f;
 static int16_t s_click_prev_ref = 0;   // previous frame's ch1 peak (see below)
 static uint32_t s_click_frames = 0;
@@ -247,6 +238,7 @@ static void fetch_task(void *arg)
 {
     (void)arg;
     int speech_run = 0;
+    int silence_run = 0;
     bool ducked = false;
 
     for (;;) {
@@ -315,12 +307,26 @@ static void fetch_task(void *arg)
                 playback_barge_in();
                 ducked = true;
             }
+            silence_run = 0;
         } else {
             speech_run = 0;
-            if (ducked && !playing) { ducked = false; }
-            else if (ducked && res->vad_state != VAD_SPEECH) {
-                playback_unduck();   // false alarm (cough/door) -> restore volume
+            if (ducked && !playing) {
                 ducked = false;
+                silence_run = 0;
+            } else if (ducked && res->vad_state != VAD_SPEECH) {
+                // T3.1: end the interruption only after sustained silence.
+                // Un-ducking on the first non-speech frame (~16 ms) made the
+                // robot bounce back to full volume inside the gaps between the
+                // user's own syllables, then duck again -- audible flapping,
+                // and the opposite of "the user is still talking".
+                if (++silence_run >= CONFIG_AEC_BARGEIN_SILENCE_FRAMES) {
+                    ESP_LOGI(TAG, "barge-in ended: %d silent frames -> unduck", silence_run);
+                    playback_unduck();   // false alarm (cough/door) -> restore volume
+                    ducked = false;
+                    silence_run = 0;
+                }
+            } else {
+                silence_run = 0;
             }
         }
 #endif

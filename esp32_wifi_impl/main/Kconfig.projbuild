@@ -77,6 +77,20 @@ config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"
     default 4
 
+config AEC_BARGEIN_SILENCE_FRAMES
+    int "Sustained AFE silence frames before un-ducking a false trigger"
+    default 20
+    help
+      T3.1 asks for roughly 320 ms of continuous silence to end an
+      interruption; at the AFE's ~16 ms frame that is 20 frames.
+
+      This must not be 1. Natural speech has inter-syllable gaps far longer
+      than one frame, so un-ducking on the first non-speech frame makes the
+      robot bounce back to full volume in the middle of being interrupted and
+      duck again a moment later. The asymmetry with the 4-frame start
+      threshold is deliberate: starting should be fast, stopping should be
+      reluctant.
+
 config AEC_SPEAKER_VOLUME
     int "AEC-path speaker volume 0..100"
     default 75
