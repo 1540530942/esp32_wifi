@@ -372,6 +372,11 @@ static std::string device_state() {
                             s_audio_player != nullptr ? s_audio_player->spk_buffer_ms() : 0);
     cJSON_AddNumberToObject(state, "spk_played_ms",
                             s_audio_player != nullptr ? s_audio_player->spk_played_ms() : 0);
+    // T3.2: how long the last stop actually took to silence the speaker. E4's
+    // t_duck is the decision instant, not this one, so a healthy-looking
+    // latency can still leave the robot audibly talking.
+    cJSON_AddNumberToObject(state, "stop_latency_ms",
+                            s_audio_player != nullptr ? s_audio_player->last_stop_latency_ms() : -1);
     cJSON_AddBoolToObject(state, "mqtt_connected",
                           s_mqtt_control != nullptr && s_mqtt_control->is_connected());
     cJSON_AddBoolToObject(state, "activated", s_audio_player != nullptr);

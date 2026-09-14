@@ -106,7 +106,13 @@ esp_err_t AudioPlayer::play_pcm_url(const std::string& url, uint8_t volume_perce
 }
 
 esp_err_t AudioPlayer::stop() {
-    if (busy_.load()) stop_requested_ = true;
+    if (busy_.load()) {
+        int64_t expected = 0;
+        // First stop of this utterance wins; a repeated stop must not restart
+        // the clock and make the measurement look better than it is.
+        stop_requested_us_.compare_exchange_strong(expected, esp_timer_get_time());
+        stop_requested_ = true;
+    }
     return ESP_OK;
 }
 
@@ -164,6 +170,7 @@ int AudioPlayer::spk_played_ms() const {
 void AudioPlayer::play_task() {
     samples_written_ = 0;
     first_write_us_ = 0;
+    stop_requested_us_ = 0;
     const std::string url = pending_url_;
     const uint8_t volume = pending_volume_;
     const bool pcm = pending_pcm_;
@@ -198,6 +205,12 @@ void AudioPlayer::play_task() {
     const int buffered_ms = spk_buffer_ms();
     last_played_ms_ = stop_requested_ ? static_cast<int>(written_ms) - buffered_ms
                                       : static_cast<int>(written_ms);
+    const int64_t stop_us = stop_requested_us_.load();
+    if (stop_us != 0) {
+        last_stop_latency_ms_ = (int)((esp_timer_get_time() - stop_us) / 1000);
+        ESP_LOGI(TAG, "T3.2 stop latency = %d ms (request -> output torn down)",
+                 last_stop_latency_ms_.load());
+    }
     ESP_LOGI(TAG, "playback position: written=%lldms played=%dms dropped=%dms",
              (long long)written_ms, last_played_ms_.load(),
              stop_requested_ ? buffered_ms : 0);
