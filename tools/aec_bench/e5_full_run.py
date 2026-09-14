@@ -123,6 +123,41 @@ def play_one(name, expected_ms):
 def main() -> int:
     print(f"E5 full scope: {len(TURNS)} turns, "
           f"{sum(d for _, d in TURNS) / 1000:.2f}s total, Pi silent\n")
+    # The device announces itself after a reboot ("今天是9月14日，星期一，固件版本
+    # ...") through the same single AudioPlayer these turns use. Starting a run
+    # right after an OTA puts the two in a fight that looks exactly like E5
+    # failing: acks come back "wav_start INVALID_STATE" (player busy, nothing
+    # played) and "wav_playback INVALID_STATE" (stopped mid-clip), and
+    # spk_played_ms freezes early just as a barge-in would leave it.
+    #
+    # Four firmware versions of VAD tuning went into chasing that before the
+    # acks were read. Wait the announcement out.
+    up = state().get("uptime_s") or 0
+    if up < 150:
+        wait = 150 - up
+        print(f"  设备开机仅 {up}s，等 {wait}s 让开机播报结束 ...")
+        time.sleep(wait)
+
+    # Commands go out as MQTT retained messages (server.py publishes with
+    # retain=True and clears the flag when the device accepts). If a clear is
+    # missed the command stays on the broker and REPLAYS on every reconnect --
+    # and this device reconnects often. Twelve stale stop_audio acks arrived in
+    # one burst during a run, against the single stop this script sends, and
+    # every one of them kills whatever is playing.
+    #
+    # That, not the VAD, is what four firmware versions of tuning were chasing.
+    # Wait until the replays stop before measuring anything.
+    print("  等 retained 命令重放结束 ...")
+    stable = 0
+    last = stop_ack_count()
+    while stable < 3:
+        time.sleep(20)
+        now_count = stop_ack_count()
+        stable = stable + 1 if now_count == last else 0
+        if now_count != last:
+            print(f"    仍在重放（stop 回执 {last} -> {now_count}），继续等")
+        last = now_count
+
     post(f"{HUB}/command", {"action": "stop_audio"})   # clear the decks once
     time.sleep(12)
     # Let any stop_audio still in flight from earlier tooling land before the
