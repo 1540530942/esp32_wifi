@@ -87,7 +87,7 @@ config AEC_BARGEIN_ONSET_GRACE_MS
 
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
-    default 64
+    default 48
     help
       How much speech the AFE must hear before it reports VAD_SPEECH. The
       esp-sr default of 128 ms is most of the latency E4 could not account
@@ -96,11 +96,15 @@ config AEC_VAD_MIN_SPEECH_MS
 
 config AEC_BARGEIN_SPEECH_FRAMES
     int "Sustained AFE speech frames to trigger local duck"
-    default 2
+    default 1
     help
       Stacked on top of vad_min_speech_ms, so the real speech-confirmation
-      time is the sum. Dropped from 4 to 2 once vad_min_speech_ms became
-      explicit, to keep the total near what T3.1 asks rather than tripling it.
+      time is the sum: 48 + 16 = 64 ms, close to the ~48 ms T3.1 asks for.
+      The AFE is already requiring sustained speech, so a second sustained
+      check on top of it was mostly duplicating that work at the cost of
+      latency. At 64 ms per step E4 read 139/188/199/204/212 ms over six
+      samples -- a median inside the 200 ms budget but a third of the samples
+      outside it, which is not a pass worth claiming.
 
 config AEC_BARGEIN_EARLY_RATIO_X10
     int "Early barge-in: ch0/ch1 ratio rise over its envelope, x10"
