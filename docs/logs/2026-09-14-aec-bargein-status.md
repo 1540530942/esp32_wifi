@@ -22,6 +22,16 @@
 | **P3** 打断接入生产路径 | —— | 已实现，经两轮回归修复 | p3-bargein |
 | **T3.3** 播放位置回报 | 心跳上报 spk_buffer_ms | buf 0–75ms（上限 90）；播完 37920ms 与素材逐毫秒吻合；打断后冻结在 10632ms | t33-position |
 | **E4 前置** t_click 检测器 | 回声不误触发、真信号能触发 | 负向 v50 不触发 / 正向 v51(降阈值)触发 | e4-click |
+| **T3.1** 起始门限 | ~48ms 连续语音 | 4 帧 ≈ 64ms | t31-silence |
+
+## 实现完成、但验证被树莓派阻塞（不要当成已验收）
+
+这两项代码已就绪并上机跑过回归，但它们的**效果**无法在没有人声源的情况下观察到：
+
+| 项 | 为什么验不了 | 详见 |
+|---|---|---|
+| E4 延迟配对算术 `latency = duck − click` | 需要一个既触发咔哒、又触发打断的声源 | e4-click |
+| T3.1 静音挂起（320ms 才恢复） | 机器人自己的回声不触发打断（E5），造不出被打断的状态 | t31-silence |
 
 ## 未完成（硬件阻塞）
 
@@ -114,4 +124,4 @@ python3 aec_bench.py --tag e3 --seconds 25 --settle 1 --volume 80 \
   `e5_false_bargein.py` / `ref_level.py` / `make_pink_noise.py` / `make_click_fixtures.py`）
 - 素材：`spark:~/workspace/data/aec/dialogue_wenyanwen/`（10 段对话原始 24kHz）
   和其 `esp32/` 子目录（5 段 assistant 的 16kHz 转码版 + 粉红噪声）
-- 当前固件：`esp32-wangyutang-v52-click-restored`
+- 当前固件：`esp32-wangyutang-v53-silence-hangover`
