@@ -71,7 +71,7 @@ config AEC_LOCAL_BARGEIN
 
 config AEC_BARGEIN_ONSET_GRACE_MS
     int "Ignore barge-in for the first N ms of a TTS turn (AEC converge)"
-    default 900
+    default 1500
     help
       Must clear the AEC's convergence time with margin. E1 measured
       convergence at 0.4-0.5 s, and the previous 500 ms sat exactly on that
@@ -84,6 +84,19 @@ config AEC_BARGEIN_ONSET_GRACE_MS
       interruption becomes possible after the robot starts talking, which is
       what the grace exists for. Per the task list, the response to a false
       barge-in is to adjust the VAD gating, not the AEC.
+
+      900 -> 1500 after E5 at its full 127 s scope cut turn06 and turn08 at
+      841 and 821 ms of audio. Those look like they precede a 900 ms grace but
+      do not: played counts audio while the grace counts wall clock from
+      play_task entry, which also covers the HTTP connect and header parse
+      ahead of the first sample. Both were fractionally past the gate, the same
+      "fires the moment it becomes eligible" shape as v58 and v62.
+
+      This is the cost of the E4 work: vad_min_speech_ms went 128 -> 48 ms to
+      meet the latency budget, and the VAD became correspondingly quicker to
+      call residual echo speech. E4 and E5 constrain each other directly, and a
+      setting that satisfies both has to be demonstrated at full scope, not on
+      one clip.
 
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
