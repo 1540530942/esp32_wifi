@@ -26,6 +26,16 @@ public:
     int64_t last_pcm_elapsed_ms() const { return last_pcm_elapsed_ms_.load(); }
     int last_pcm_pa_level() const { return last_pcm_pa_level_.load(); }
 
+    // Audio handed to the codec but not yet heard, in ms. The I2S write blocks
+    // once the DMA ring is full, so "written minus elapsed" is how far ahead of
+    // the speaker the writer has got -- which is exactly the audio a barge-in
+    // throws away. Needed to truncate conversation history correctly after an
+    // interruption: if TTS is cut at the 20th character and the full 80 go into
+    // the history, the model believes it finished and carries on from there.
+    int spk_buffer_ms() const;
+    // Audio actually played in the current utterance, in ms.
+    int spk_played_ms() const;
+
     // Mic-capture -> cloud ASR -> TTS-playback validation loop (see
     // docs/logs/ for the write-up). Records `seconds` of mono PCM from the
     // already-enabled ES7210 input path, POSTs it to the cloud ASR endpoint,
@@ -61,6 +71,11 @@ public:
 private:
     static void task_entry(void* arg);
     void play_task();
+    // Called right after every successful AudioCodec_OutputData(). The clock
+    // starts at the FIRST write, not at play_task() entry: the HTTP connect
+    // and WAV-header parse in between would otherwise be counted as elapsed
+    // playback and make the buffer estimate read low for the first second.
+    void note_samples_written(int samples);
     esp_err_t play_wav_stream(const std::string& url, uint8_t volume_percent);
     esp_err_t play_wav_stream_raw_http(const std::string& url, uint8_t volume_percent);
     esp_err_t play_pcm_stream_websocket(const std::string& url, uint8_t volume_percent,
@@ -88,6 +103,9 @@ private:
     std::atomic<size_t> last_pcm_bytes_{0};
     std::atomic<int64_t> last_pcm_elapsed_ms_{0};
     std::atomic<int> last_pcm_pa_level_{-1};
+    std::atomic<uint64_t> samples_written_{0};
+    std::atomic<int64_t> first_write_us_{0};  // 0 = nothing written yet this utterance
+    std::atomic<int> last_played_ms_{0};      // frozen at the end of each utterance
     std::string last_error_;
     std::string last_asr_text_;
     AecProbeResult last_probe_result_{};

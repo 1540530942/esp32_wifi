@@ -122,7 +122,37 @@ void AudioPlayer::task_entry(void* arg) {
     }
 }
 
+void AudioPlayer::note_samples_written(int samples) {
+    if (samples <= 0) return;
+    int64_t expected = 0;
+    // Only the playback task calls this, so the compare_exchange is just a
+    // cheap "first time?" test, not contention handling.
+    first_write_us_.compare_exchange_strong(expected, esp_timer_get_time());
+    samples_written_.fetch_add(static_cast<uint64_t>(samples));
+}
+
+int AudioPlayer::spk_buffer_ms() const {
+    const int64_t started = first_write_us_.load();
+    if (started == 0 || !busy_.load()) return 0;
+    const int64_t written_ms =
+        static_cast<int64_t>(samples_written_.load() * 1000ULL / AUDIO_OUTPUT_SAMPLE_RATE);
+    const int64_t elapsed_ms = (esp_timer_get_time() - started) / 1000;
+    const int64_t lead = written_ms - elapsed_ms;
+    return lead > 0 ? static_cast<int>(lead) : 0;
+}
+
+int AudioPlayer::spk_played_ms() const {
+    const int64_t started = first_write_us_.load();
+    if (started == 0) return last_played_ms_.load();
+    if (!busy_.load()) return last_played_ms_.load();
+    const int64_t written_ms =
+        static_cast<int64_t>(samples_written_.load() * 1000ULL / AUDIO_OUTPUT_SAMPLE_RATE);
+    return static_cast<int>(written_ms) - spk_buffer_ms();
+}
+
 void AudioPlayer::play_task() {
+    samples_written_ = 0;
+    first_write_us_ = 0;
     const std::string url = pending_url_;
     const uint8_t volume = pending_volume_;
     const bool pcm = pending_pcm_;
@@ -147,6 +177,19 @@ void AudioPlayer::play_task() {
     ESP_LOGI(TAG, "%s playback %s", pcm ? "PCM WebSocket" : "WAV", err == ESP_OK ? "finished" :
              (stop_requested_ ? "stopped" : "failed"));
     if (wdt_add_err == ESP_OK) esp_task_wdt_delete(nullptr);
+    // Freeze how much was actually heard, while busy_ is still true so
+    // spk_buffer_ms() is still meaningful. An utterance that ran to the end
+    // drained its buffer; one that was interrupted threw the buffer away, and
+    // the difference is exactly the text the user never heard -- which is what
+    // conversation-history truncation has to cut.
+    const int64_t written_ms =
+        static_cast<int64_t>(samples_written_.load() * 1000ULL / AUDIO_OUTPUT_SAMPLE_RATE);
+    const int buffered_ms = spk_buffer_ms();
+    last_played_ms_ = stop_requested_ ? static_cast<int>(written_ms) - buffered_ms
+                                      : static_cast<int>(written_ms);
+    ESP_LOGI(TAG, "playback position: written=%lldms played=%dms dropped=%dms",
+             (long long)written_ms, last_played_ms_.load(),
+             stop_requested_ ? buffered_ms : 0);
     playback_set_external_active(false);
     stop_requested_ = false;
     busy_ = false;
@@ -266,6 +309,7 @@ esp_err_t AudioPlayer::play_pcm_stream_websocket(const std::string& url,
             ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
             : 0;
         output_write_us += esp_timer_get_time() - write_started_us;
+        note_samples_written(written);
         if (written != samples) ESP_LOGW(TAG, "PCM short write requested=%d written=%d", samples, written);
         total_bytes += static_cast<size_t>(read_result);
     }
@@ -356,6 +400,7 @@ esp_err_t AudioPlayer::play_wav_stream(const std::string& url, uint8_t volume_pe
         const int written = samples > 0
             ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(input), samples)
             : 0;
+        note_samples_written(written);
         if (written != samples) {
             ESP_LOGW(TAG, "I2S/codec short write requested=%d written=%d", samples, written);
         }
@@ -617,6 +662,7 @@ esp_err_t AudioPlayer::play_wav_stream_raw_http(const std::string& url,
         const int written = samples > 0
             ? AudioCodec_OutputData(codec_, reinterpret_cast<int16_t*>(pcm_buffer), samples)
             : 0;
+        note_samples_written(written);
         if (written != static_cast<int>(samples)) {
             ESP_LOGW(TAG, "I2S/codec short write requested=%u written=%d",
                      static_cast<unsigned>(samples), written);

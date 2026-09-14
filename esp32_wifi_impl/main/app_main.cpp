@@ -364,6 +364,14 @@ static std::string device_state() {
     cJSON_AddNumberToObject(state, "reset_reason", (int)esp_reset_reason());
     cJSON_AddBoolToObject(state, "audio_playing",
                           s_audio_player != nullptr && s_audio_player->is_playing());
+    // T3.3: how far the writer is ahead of the speaker, and how much of the
+    // current (or most recent) utterance was actually heard. On a barge-in the
+    // difference is audio the user never got, so the LLM's conversation history
+    // has to be truncated to spk_played_ms rather than to the full TTS text.
+    cJSON_AddNumberToObject(state, "spk_buffer_ms",
+                            s_audio_player != nullptr ? s_audio_player->spk_buffer_ms() : 0);
+    cJSON_AddNumberToObject(state, "spk_played_ms",
+                            s_audio_player != nullptr ? s_audio_player->spk_played_ms() : 0);
     cJSON_AddBoolToObject(state, "mqtt_connected",
                           s_mqtt_control != nullptr && s_mqtt_control->is_connected());
     cJSON_AddBoolToObject(state, "activated", s_audio_player != nullptr);
