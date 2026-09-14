@@ -42,3 +42,28 @@
 （空 —— 目前没有人在做跨文件大改动。`cloud/device_hub/server.py` 与生产的分叉已于
 2026-09-14 合并并部署，详见 `docs/logs/2026-09-14-device-hub-fork-merge.md` 与
 `docs/logs/2026-09-14-device-hub-production-deploy.md`。）
+
+## ⚠️ 硬件阻塞：树莓派（turbopi-01 / raspberrypi）掉线
+
+2026-09-14 07:10 之后失联，**三条独立路径全部不通**：
+
+- 反向 SSH 隧道 `pi-reverse`（127.0.0.1:10024）→ Connection refused
+- Tailscale `pi-tailnet`（100.118.92.117:22）→ Connection timed out
+- `action_move` 服务端 `/api/diagnostics` → 无设备记录
+
+远程无法恢复，**需要现场处理**（供电/网络/重启）。掉线前最后的活动是
+`codex-loop-camera-check` 在 07:09–07:10 驱动机器人做前后左右移动——如果那个循环
+还在跑，可能需要先确认它有没有把机器人开到没电或断网的位置。
+
+**它挡住的是 AEC 打断的最后验收环节**：E2b（AEC 误伤检测）、E3（双讲）、E4（打断
+延迟 <200ms）都需要树莓派扮演"房间里说话的人"。ESP32 侧能做的已经全部做完并通过
+（P0、P1、E1、E2、E5、P3 实现），整体进度见
+`docs/logs/2026-09-14-aec-bargein-status.md`。
+
+树莓派一恢复就可以直接跑：
+
+```bash
+cd tools/aec_bench
+python3 aec_bench.py --tag e2b --seconds 25 --settle 2 --no-play \
+    --pi-play turn03_user.wav --pi-volume 100 --pi-delay 3
+```
