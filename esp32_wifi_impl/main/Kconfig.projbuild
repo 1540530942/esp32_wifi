@@ -98,6 +98,20 @@ config AEC_BARGEIN_ONSET_GRACE_MS
       setting that satisfies both has to be demonstrated at full scope, not on
       one clip.
 
+config AEC_VAD_MODE
+    int "AFE vad_mode 0..4 (higher rejects more non-speech)"
+    default 4
+    help
+      WebRTC VAD aggressiveness. 4 is the most willing to call something noise
+      rather than speech, which is what E5 needs, and it costs no latency
+      because it changes the decision rather than how long the decision takes.
+
+      Was 3. Serial confirmed E5 fails at mode 3 with vad_min_speech_ms=64:
+      two real barge-ins with zero external stops, cutting turn04 at 8.1 s and
+      turn08 at 6.3 s. E4 needs the duration low (median 127 ms at 48 ms, 193 ms
+      at 64 ms), so the duration knob alone has no value that satisfies both
+      criteria and the threshold has to move instead.
+
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
     default 64

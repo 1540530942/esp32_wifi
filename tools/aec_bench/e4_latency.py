@@ -153,9 +153,17 @@ def main() -> None:
         else:
             bad.append(out["reason"])
             print(f"run {i}: 作废 — {out['reason']}")
-        # Let the clip finish so the next run starts from a clean state.
-        post(f"{HUB}/command", {"action": "stop_audio"})
-        time.sleep(10)
+        # End the clip, and WAIT for the device to acknowledge it. Commands are
+        # published retained (server.py publishes with retain=True and clears
+        # the flag on acceptance); firing one and walking away leaves it on the
+        # broker to replay at every reconnect. A backlog built that way killed
+        # four consecutive full-scope E5 runs before anyone read the acks --
+        # twelve stale stops arriving in one burst. Waiting for the ack is what
+        # gets the retained flag cleared.
+        stop_id = post(f"{HUB}/command", {"action": "stop_audio"}).get("command_id", "")
+        if stop_id:
+            command_ack(stop_id, timeout_s=30)
+        time.sleep(6)
 
     print()
     if good:

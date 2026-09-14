@@ -479,7 +479,15 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     cfg->wakenet_init = false;
     cfg->agc_init     = false;
     cfg->vad_init     = true;
-    cfg->vad_mode     = VAD_MODE_3;
+    // VAD_MODE_4 is the most aggressive setting esp-sr offers at rejecting
+    // non-speech. This is the half of "adjust the VAD threshold and the
+    // minimum speech duration" that had not been tried: it changes the
+    // decision, not the duration, so unlike vad_min_speech_ms it costs no
+    // latency. Serial confirmed E5 genuinely fails at mode 3 with
+    // vad_min_speech_ms=64 -- two real barge-ins, zero external stops -- while
+    // E4 needs that duration low, so the duration knob alone has no setting
+    // that satisfies both.
+    cfg->vad_mode     = (vad_mode_t)CONFIG_AEC_VAD_MODE;
     // The AFE will not report speech until it has heard this much of it, and
     // the default is 128 ms. That is the bulk of the ~210 ms that E4 could not
     // account for: 128 ms here, plus the sustained-frame check above it, plus
