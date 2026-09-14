@@ -87,7 +87,7 @@ config AEC_DUCK_VOLUME_PCT
 
 config AEC_CLICK_TRIGGER_RATIO_X10
     int "E4 click detector: ch0/ch1 ratio rise over its envelope, x10"
-    default 11
+    default 40
     help
       40 means the ratio peak0/peak_ref must reach 4.0x its running envelope
       (+12 dB) for a frame to count as an external onset rather than the
