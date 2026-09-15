@@ -530,13 +530,52 @@ def enqueue_command(device_id: str, req: CommandReq) -> Any:
             "id": command_id,
             "action": req.action,
             "args": req.args,
-            "status": "pending",
+            # Reserve before publishing, exactly as play_audio does, so a
+            # heartbeat arriving mid-publish cannot mark this dispatched
+            # without MQTT having delivered it.
+            "status": "dispatching",
             "created_at": time.time(),
             "dispatched_at": 0.0,
             "done_at": 0.0,
             "message": "",
+            "transport": "mqtt",
         })
         data[device_id] = rec
+        _save(data)
+
+    # This endpoint used to stop here, leaving every command to be picked up
+    # from the next heartbeat response. play_audio published over MQTT; nothing
+    # else did, and the asymmetry was invisible because the heartbeat fallback
+    # always eventually delivered. Measured cost was a 10.9s median round trip
+    # (max 49s) on stop_audio, set_volume and the diagnostic commands -- the
+    # device heartbeats every 5s, so a command waits for one poll to arrive and
+    # another to have its ack carried back.
+    #
+    # That was mistaken for a platform-wide "command delivery is slow" problem
+    # and blamed in turn on retained-message replays and on a full disk. Both of
+    # those were real and both were separate; this is the part that made
+    # ordinary commands slow, and it is a missing publish rather than anything
+    # to tune.
+    #
+    # It matters beyond test tooling: cloud-initiated stop_audio rides this
+    # path. On-device barge-in is unaffected (it never leaves the ESP32, and
+    # measures 152ms), but a stop issued from the cloud inherited the full poll
+    # latency.
+    published = _device_mqtt_ready(device_id) and _enqueue_mqtt_command(
+        device_id, command_id, req.action, req.args or {},
+    )
+    with DATA_LOCK:
+        data = _load()
+        rec = data[device_id]
+        for command in rec.get("commands", []):
+            if command.get("id") == command_id:
+                # A fast device can ACK while publish() is still returning.
+                # Never overwrite a terminal ACK with "dispatched".
+                if command.get("status") == "dispatching":
+                    command["status"] = "dispatched" if published else "pending"
+                    command["dispatched_at"] = time.time() if published else 0.0
+                    command["transport"] = "mqtt" if published else "heartbeat"
+                break
         _save(data)
     known = req.action in KNOWN_ACTIONS
     return {"ok": True, "command_id": command_id, "known_action": known}
