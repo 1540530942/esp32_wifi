@@ -34,6 +34,34 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
 
+def _broker_retained_topics(settle_s: float = 6.0) -> list[str]:
+    """Every retained command topic the broker will replay to a subscriber.
+
+    Subscribing to the wildcard delivers exactly what a reconnecting device
+    gets, which is the thing that actually matters -- there is no API to list
+    retained messages, so the only honest way to enumerate them is to receive
+    them the same way the device does.
+    """
+    seen: list[str] = []
+    client = mqtt.Client(client_id=f"scan-{secrets.token_hex(4)}",
+                         protocol=mqtt.MQTTv311)
+
+    def on_message(_c, _u, msg):
+        # A zero-length payload IS the tombstone that clears a retained topic,
+        # so it is not a live command and must not be counted as one.
+        if msg.payload and msg.topic not in seen:
+            seen.append(msg.topic)
+
+    client.on_message = on_message
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    client.subscribe("devices/+/command/#", qos=1)
+    client.loop_start()
+    time.sleep(settle_s)
+    client.loop_stop()
+    client.disconnect()
+    return seen
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -50,6 +78,22 @@ def main() -> int:
             if cid:
                 topics.append((f"devices/{device_id}/command/{cid}",
                                command.get("action"), command.get("status")))
+
+    # Also ask the broker what it is actually holding. devices.json is the
+    # hub's record, not the broker's, and the two diverge: the command list is
+    # trimmed, and a hub redeploy or a restored data file loses ids whose
+    # retained message is still sitting on the broker and still replaying.
+    #
+    # This matters -- clearing only what devices.json remembered left a day's
+    # worth of retained play_audio on the broker. Every reconnect delivered the
+    # whole backlog at once, each play_audio stopping the one before it, which
+    # surfaced as "wav_playback ESP_ERR_INVALID_STATE" with played=0 and looked
+    # like a broken player. A reboot made it worse rather than better, because a
+    # reboot is a reconnect.
+    known = {t for t, _, _ in topics}
+    for topic in _broker_retained_topics():
+        if topic not in known:
+            topics.append((topic, "?", "retained-on-broker"))
 
     print(f"{len(topics)} command topics on record")
     stale = [t for t in topics if t[2] != "done"]

@@ -54,20 +54,44 @@ def device_state() -> dict:
 
 
 def command_ack(command_id: str, timeout_s: float = 45) -> str | None:
-    """Wait for the device's own acknowledgement of a command."""
+    """Wait for the device's own acknowledgement of a command.
+
+    Reads the command record, not the log list. Two reasons the log was the
+    wrong place to look:
+
+    * Only commands the firmware rejects produce a log line ("status=unsupported
+      ack=ESP_OK"). A command that succeeds puts its answer in the record's
+      `message` field -- click_arm replies "armed", click_result replies with
+      the latency -- and never appears in the log at all. Seven E4 runs were
+      discarded as "click_arm never acknowledged" while every one of them had in
+      fact completed in about 150ms.
+    * The log list is capped at 200 entries, so a chatty run pushes older acks
+      out from under a reader that is still waiting for one.
+
+    The record carries status, message and timestamps, and is keyed by id, so it
+    answers the question directly instead of by substring search.
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         proc = subprocess.run(["curl", "-s", "-m", "20", HUB],
                               capture_output=True, text=True)
         try:
-            logs = json.loads(proc.stdout).get("device", {}).get("logs") or []
+            device = json.loads(proc.stdout).get("device", {})
         except Exception:
-            logs = []
-        for entry in logs:
+            device = {}
+        for cmd in device.get("commands") or []:
+            if cmd.get("id") == command_id and \
+                    cmd.get("status") not in (None, "dispatching", "pending",
+                                              "sent", "dispatched"):
+                # Return the message when there is one; some acks carry only a
+                # status, and callers regex the string for "latency=N ms".
+                return cmd.get("message") or cmd.get("status") or ""
+        # Fall back to the log for anything that only surfaces there.
+        for entry in device.get("logs") or []:
             msg = entry.get("message", "")
             if command_id in msg:
                 return msg
-        time.sleep(5)
+        time.sleep(2)
     return None
 
 

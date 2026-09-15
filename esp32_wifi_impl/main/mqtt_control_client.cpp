@@ -204,6 +204,50 @@ void MqttControlClient::on_command(const std::string& payload) {
     cJSON_free(args_json);
     cJSON_Delete(root);
     HEAP_MARK("H1_after_job_built", command_id.c_str());
+
+    // stop_audio must not queue behind the playback it is meant to stop.
+    //
+    // There is one mqtt_cmd worker, and the play_audio handler blocks it for
+    // the entire clip ("while (player->is_playing())" in app_main). A stop sent
+    // 3s into a 37.9s clip was therefore not processed until 36.1s, by which
+    // point the clip had already finished on its own -- the stop stopped
+    // nothing. This only became reachable when commands moved onto MQTT: they
+    // used to arrive on the heartbeat task, which is a different task and was
+    // never blocked by playback, so the serialization was invisible.
+    //
+    // Running it here, on the MQTT event task, is safe because stopping is not
+    // blocking work: AudioPlayer::stop() sets an atomic flag and a timestamp
+    // and returns. It is the same reason on-device barge-in can stop playback
+    // from the AFE task.
+    // Deliberately an allowlist of handlers verified to be non-blocking, not
+    // "everything except play_audio": ota and stream_prepare also do long work,
+    // and running an unvetted handler on the MQTT event task would stall the
+    // connection itself. stop/stop_audio set an atomic flag; click_arm and
+    // click_result only read or reset AFE state -- and those two exist
+    // precisely to be used while the robot is speaking, so queuing them behind
+    // playback makes them useless (E4 could never arm mid-clip).
+    const std::string& act = job->command.action;
+    const bool urgent = act == "stop_audio" || act == "stop" ||
+                        act == "click_arm" || act == "click_result";
+    if (urgent) {
+        // Mirror command_task's reporting exactly -- accepted first, then the
+        // final status carrying the action -- so an inline stop is acknowledged
+        // the same way a queued one is. Without this the hub never marks it
+        // done and eventually expires it as a timeout.
+        publish_status(job->command.id, "accepted", {}, job->command.action);
+        const std::string result = command_handler_ ? command_handler_(job->command)
+                                                    : "unsupported";
+        const size_t separator = result.find('|');
+        publish_status(job->command.id,
+                       separator == std::string::npos ? result
+                                                      : result.substr(0, separator),
+                       separator == std::string::npos ? std::string()
+                                                      : result.substr(separator + 1),
+                       job->command.action);
+        delete job;
+        return;
+    }
+
     if (!job_queue_ || xQueueSend(job_queue_, &job, 0) != pdTRUE) {
         publish_status(job->command.id, "failed", "command queue full");
         delete job;
