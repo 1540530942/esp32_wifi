@@ -71,7 +71,7 @@ def main() -> int:
         # had already written it off -- so "command not delivered" in earlier
         # runs was really "delivered late", and a 60 s window threw away turns
         # that would have played.
-        waited = time.time() + 180
+        waited = time.time() + 100
         got_start = False
         while time.time() < waited:
             probe = ser.readline()
