@@ -123,6 +123,17 @@ static std::string read_es7210_gain_regs(AudioPlayer* player) {
     return std::string(buf);
 }
 
+// --- echo loop state --------------------------------------------------------
+// The demo loop runs in its own task rather than inside the command handler.
+// A handler that never returns would hold the single mqtt_cmd worker forever,
+// which is exactly the failure that made cloud stop_audio useless when commands
+// moved onto MQTT -- there is no reason to reintroduce it deliberately.
+static volatile bool s_echo_loop_on = false;
+static volatile bool s_echo_loop_stop = false;
+static volatile uint32_t s_echo_cycles = 0;    // turns the robot has spoken
+static volatile uint32_t s_echo_replies = 0;   // ... of those, ones it echoed back
+static char s_echo_last[96] = {0};
+
 static bool is_local_audio_url(const char* url) {
     if (!url) return false;
     const char* base = CONFIG_LOCAL_AUDIO_BASE_URL;
@@ -385,6 +396,13 @@ static std::string device_state() {
         cJSON_AddNumberToObject(state, "ref_peak_dbfs", (double)ref_dbfs);
         cJSON_AddNumberToObject(state, "ref_clip_frames", (double)clip_frames);
     }
+    // Echo-loop progress. The loop runs unattended for minutes at a time and
+    // there is no serial console on this board, so without these the only
+    // evidence it is alive is audio in the room.
+    cJSON_AddBoolToObject(state, "echo_loop", s_echo_loop_on);
+    cJSON_AddNumberToObject(state, "echo_cycles", (double)s_echo_cycles);
+    cJSON_AddNumberToObject(state, "echo_replies", (double)s_echo_replies);
+    if (s_echo_last[0]) cJSON_AddStringToObject(state, "echo_last", s_echo_last);
     cJSON_AddNumberToObject(state, "stop_latency_ms",
                             s_audio_player != nullptr ? s_audio_player->last_stop_latency_ms() : -1);
     cJSON_AddBoolToObject(state, "mqtt_connected",
@@ -635,6 +653,28 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples,
              (int)(heap_in - heap_out));
     return ok;
 }
+
+static void echo_loop_task(void* arg) {
+    auto* cfg = static_cast<EchoLoopCfg*>(arg);
+    while (!s_echo_loop_stop) {
+        const std::string r = echo_demo_cycle(cfg->player, cfg->url, cfg->quiet_ms,
+                                              cfg->end_sil_ms, cfg->max_rec_s,
+                                              cfg->wait_s, cfg->vol);
+        if (s_echo_loop_stop) break;
+        s_echo_cycles++;
+        if (r.find("rec=") != std::string::npos) s_echo_replies++;
+        snprintf(s_echo_last, sizeof(s_echo_last), "%s", r.c_str());
+        ESP_LOGI(TAG, "echo loop cycle %u: %s", (unsigned)s_echo_cycles, r.c_str());
+        // A breath between turns. Without it a cycle that ends without anyone
+        // speaking spins straight back into waiting, and the robot can start
+        // talking over the tail of its own replay.
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+    s_echo_loop_on = false;
+    delete cfg;
+    vTaskDelete(nullptr);
+}
+
 
 static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     ESP_LOGI(TAG, "executing command=%s args=%s", cmd.action.c_str(), cmd.args_json.c_str());
@@ -921,32 +961,22 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         }
         return std::string(out);
     }
-    if (cmd.action == "echo_demo") {
-        // One full turn of the interaction, run entirely on the device:
-        //   wait for the room to go quiet -> speak -> get interrupted -> record
-        //   the interrupter -> play their words back.
-        //
-        // On-device rather than cloud-orchestrated because every transition
-        // here is driven by something only the device can see (its own VAD and
-        // its own playback state). Routing those through the hub would add a
-        // round trip to each edge and make the timing a property of the network
-        // rather than of the audio.
-        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
-        auto num = [&](const char* k, int dflt, int lo, int hi) {
-            cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
-            return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
-        };
-        const int quiet_ms   = num("quiet_ms", 5000, 500, 30000);
-        const int end_sil_ms = num("end_silence_ms", 800, 200, 5000);
-        const int max_rec_s  = num("max_record_s", 15, 2, 25);
-        const int wait_s     = num("wait_s", 60, 5, 180);
-        const int vol        = num("volume", 80, 0, 100);
-        cJSON* u = a ? cJSON_GetObjectItem(a, "url") : nullptr;
-        std::string url = cJSON_IsString(u) ? u->valuestring :
-            "http://192.168.1.16:8080/esp32/turn06_assistant.wav";
-        if (a) cJSON_Delete(a);
-        if (!is_local_audio_url(url.c_str())) return "failed|stage=url_not_allowed";
+// One cycle of the echo demo. Shared by the one-shot command and the loop task
+// so the two can never drift apart.
 
+struct EchoLoopCfg {
+    AudioPlayer* player;
+    std::string url;
+    int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol;
+};
+
+// Repeats the cycle until told to stop: every time the room falls quiet for the
+// configured stretch, the robot speaks again. "never_quiet" is not an error
+// here -- it just means nobody has stopped talking yet -- so the loop waits and
+// tries again rather than giving up.
+static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
+                                   int quiet_ms, int end_sil_ms, int max_rec_s,
+                                   int wait_s, int vol) {
         // --- 1. wait for the room to be quiet -------------------------------
         const int64_t t_wait0 = esp_timer_get_time();
         while (afe_silence_ms() < quiet_ms) {
@@ -1009,6 +1039,39 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
                    "ms but recorded nothing (clean=" + std::to_string((int)nc) + ")";
         }
 
+        // --- 3b. bring it up to a listenable level ---------------------------
+        // The AFE's output is whatever the microphone picked up, and a person
+        // speaking a metre away lands around -23 dBFS peak / -40 dBFS RMS. The
+        // source material the robot plays is -8.4 / -25.8, so replaying the
+        // recording untouched is about 15 dB quieter than everything else and
+        // sounds broken even though nothing is wrong with it.
+        //
+        // Peak-normalise to -6 dBFS: loud enough to match the robot's own
+        // voice, with headroom left for the speech peaks that a short window
+        // may not contain. The gain is capped because a window with no speech
+        // in it has a tiny peak, and normalising that would just amplify the
+        // noise floor to full scale.
+        int32_t peak = 0;
+        for (size_t i = 0; i < nc; i++) {
+            const int32_t v = bclean[i] < 0 ? -bclean[i] : bclean[i];
+            if (v > peak) peak = v;
+        }
+        const int32_t target = 16422;              // -6 dBFS
+        int gain_q8 = 256;
+        if (peak > 0) {
+            gain_q8 = (int)((int64_t)target * 256 / peak);
+            if (gain_q8 < 256) gain_q8 = 256;      // never attenuate
+            if (gain_q8 > 4096) gain_q8 = 4096;    // +24 dB ceiling
+        }
+        if (gain_q8 > 256) {
+            for (size_t i = 0; i < nc; i++) {
+                int32_t v = ((int32_t)bclean[i] * gain_q8) >> 8;
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
+                bclean[i] = (int16_t)v;
+            }
+        }
+
         // --- 4. hand it back -------------------------------------------------
         // play=1: the hub answers the upload with a play_audio for this file,
         // so the recording comes back out of the speaker on its own.
@@ -1021,11 +1084,76 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         char out[224];
         snprintf(out, sizeof(out),
                  "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
-                 "samples=%u upload=%d file=%s",
+                 "samples=%u peak=%d gain=%.1fx upload=%d file=%s",
                  (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
-                 (unsigned)nc, up ? 1 : 0, fname);
+                 (unsigned)nc, (int)peak, gain_q8 / 256.0, up ? 1 : 0, fname);
         return std::string(out);
+
+}
+
+    if (cmd.action == "echo_demo") {
+        // One full turn of the interaction, run entirely on the device:
+        //   wait for the room to go quiet -> speak -> get interrupted -> record
+        //   the interrupter -> play their words back.
+        //
+        // On-device rather than cloud-orchestrated because every transition
+        // here is driven by something only the device can see (its own VAD and
+        // its own playback state). Routing those through the hub would add a
+        // round trip to each edge and make the timing a property of the network
+        // rather than of the audio.
+        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
+        auto num = [&](const char* k, int dflt, int lo, int hi) {
+            cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
+            return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
+        };
+        const int quiet_ms   = num("quiet_ms", 5000, 500, 30000);
+        const int end_sil_ms = num("end_silence_ms", 800, 200, 5000);
+        const int max_rec_s  = num("max_record_s", 15, 2, 25);
+        const int wait_s     = num("wait_s", 60, 5, 180);
+        const int vol        = num("volume", 80, 0, 100);
+        cJSON* u = a ? cJSON_GetObjectItem(a, "url") : nullptr;
+        std::string url = cJSON_IsString(u) ? u->valuestring :
+            "http://192.168.1.16:8080/esp32/turn06_assistant.wav";
+        if (a) cJSON_Delete(a);
+        if (!is_local_audio_url(url.c_str())) return "failed|stage=url_not_allowed";
+
+        const bool loop = [&]{
+            cJSON* b = cJSON_Parse(cmd.args_json.c_str());
+            cJSON* it = b ? cJSON_GetObjectItem(b, "loop") : nullptr;
+            const bool v = cJSON_IsTrue(it);
+            if (b) cJSON_Delete(b);
+            return v;
+        }();
+
+        if (!loop) return echo_demo_cycle(player, url, quiet_ms, end_sil_ms,
+                                          max_rec_s, wait_s, vol);
+
+        if (s_echo_loop_on) return "failed|stage=already_running";
+        // Heap-allocated because the task outlives this handler's frame.
+        auto* cfg = new EchoLoopCfg{player, url, quiet_ms, end_sil_ms,
+                                    max_rec_s, wait_s, vol};
+        s_echo_loop_stop = false;
+        s_echo_cycles = 0;
+        s_echo_replies = 0;
+        s_echo_last[0] = 0;
+        s_echo_loop_on = true;
+        if (xTaskCreate(&echo_loop_task, "echo_loop", 8192, cfg, 4, nullptr) != pdPASS) {
+            s_echo_loop_on = false;
+            delete cfg;
+            return "failed|stage=task_create";
+        }
+        return "done|loop started";
     }
+
+    if (cmd.action == "echo_stop") {
+        if (!s_echo_loop_on) return "done|loop was not running";
+        s_echo_loop_stop = true;
+        // Stop whatever is currently coming out of the speaker too, so the
+        // room goes quiet immediately rather than at the end of the turn.
+        if (player) player->stop();
+        return "done|stopping cycles=" + std::to_string((unsigned)s_echo_cycles);
+    }
+
     if (cmd.action == "aec_probe") {
         if (player->is_playing()) return "failed|busy";
         esp_err_t err = player->run_aec_reference_probe();
