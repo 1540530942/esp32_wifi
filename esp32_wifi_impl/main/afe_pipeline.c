@@ -320,6 +320,36 @@ static void feed_task(void *arg)
             s_acc_mic += am; s_acc_ref += ar; s_n_in += s_feed_chunksize;
         }
         int64_t now = esp_timer_get_time();
+
+        // Reference-channel clipping watch. The task list suggests a boot
+        // self-check that plays a tone and warns if ch1 sits out of range;
+        // watching real playback covers the same risk without a startup noise
+        // and under the conditions that actually matter.
+        //
+        // The risk is measured, not hypothetical: on v75 the reference peaks at
+        // -3.9 dBFS at volume 100, i.e. 3.9 dB of headroom, and clipping there
+        // breaks the linearity the AEC depends on. Speech is worse than the
+        // pink noise those numbers came from -- same volume 80 reads -14.0 dBFS
+        // for noise and -9.0 dBFS for speech, the crest factor difference -- so
+        // the margin in real use is smaller still.
+        if (s_feed_nch > 1) {
+            static int64_t s_clip_log_us = 0;
+            int16_t ref_peak = 0;
+            for (int f = 0; f < s_feed_chunksize; f++) {
+                const int16_t r = buf[f * s_feed_nch + 1];
+                const int16_t a = r < 0 ? (int16_t)-r : r;
+                if (a > ref_peak) ref_peak = a;
+            }
+            // -3 dBFS of full scale for int16.
+            if (ref_peak > 23197 && now - s_clip_log_us > 10000000) {
+                ESP_LOGW(TAG, "AEC reference near clipping: peak=%d (%.1f dBFS). "
+                              "Lower the speaker volume; the AEC assumes a linear "
+                              "reference.",
+                         (int)ref_peak, 20.0 * log10((double)ref_peak / 32767.0));
+                s_clip_log_us = now;
+            }
+        }
+
         if (s_click_armed) click_scan(buf, s_feed_chunksize, s_feed_nch, now);
 #if CONFIG_AEC_LOCAL_BARGEIN
         early_bargein_scan(buf, s_feed_chunksize, s_feed_nch);
