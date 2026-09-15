@@ -115,8 +115,37 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames)
     return true;
 }
 
+// --- miss attribution ---------------------------------------------------
+// The barge-in gate is a conjunction of four conditions, and when it does not
+// fire the ack only says "no barge-in yet", which does not say which one held
+// it back. A measured 50% trigger rate cannot be diagnosed from that. These
+// count, since the last arm, how many frames each condition admitted, plus the
+// loudest AFE output seen -- enough to tell "the AEC suppressed the user"
+// (clean_rms never reached the threshold) from "the VAD never called it
+// speech", which have opposite fixes.
+static uint32_t s_gate_frames;      // frames examined while playing & past grace
+static uint32_t s_gate_loud;        // ... of those, clean_rms >= threshold
+static uint32_t s_gate_speech;      // ... of those, VAD said SPEECH
+static uint32_t s_gate_both;        // ... of those, both at once
+static int32_t  s_gate_max_rms;     // loudest AFE frame seen in the window
+
+void afe_gate_stats(uint32_t *frames, uint32_t *loud, uint32_t *speech,
+                    uint32_t *both, int32_t *max_rms)
+{
+    if (frames) *frames = s_gate_frames;
+    if (loud) *loud = s_gate_loud;
+    if (speech) *speech = s_gate_speech;
+    if (both) *both = s_gate_both;
+    if (max_rms) *max_rms = s_gate_max_rms;
+}
+
 void afe_click_arm(void)
 {
+    s_gate_frames = 0;
+    s_gate_loud = 0;
+    s_gate_speech = 0;
+    s_gate_both = 0;
+    s_gate_max_rms = 0;
     s_click_us = 0;
     s_click_duck_us = 0;
     s_click_latency_ms = -1;
@@ -483,7 +512,15 @@ static void fetch_task(void *arg)
             clean_rms = (int32_t)sqrt((double)acc / n);
         }
         const bool loud_enough = clean_rms >= CONFIG_AEC_BARGEIN_MIN_RMS;
-        if (playing && past_grace && loud_enough && res->vad_state == VAD_SPEECH) {
+        const bool is_speech = res->vad_state == VAD_SPEECH;
+        if (playing && past_grace) {
+            s_gate_frames++;
+            if (clean_rms > s_gate_max_rms) s_gate_max_rms = clean_rms;
+            if (loud_enough) s_gate_loud++;
+            if (is_speech) s_gate_speech++;
+            if (loud_enough && is_speech) s_gate_both++;
+        }
+        if (playing && past_grace && loud_enough && is_speech) {
             if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked) {
                 // Timestamp in the device's own clock so barge-in latency can be
                 // measured without cross-device sync (E4).

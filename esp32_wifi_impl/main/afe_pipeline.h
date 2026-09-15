@@ -49,6 +49,16 @@ void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
 // Returns false if no playback has been observed yet.
 bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 
+// --- barge-in miss attribution ----------------------------------------------
+// Counts, since the last afe_click_arm(), how many frames each half of the
+// barge-in gate admitted while the robot was speaking and past the onset
+// grace, plus the loudest AFE output frame seen. When a barge-in does not
+// fire, these separate "the AEC also removed the user's voice" (max_rms below
+// the threshold) from "the VAD never called it speech" -- two causes with
+// opposite fixes that the ack alone cannot distinguish.
+void afe_gate_stats(uint32_t *frames, uint32_t *loud, uint32_t *speech,
+                    uint32_t *both, int32_t *max_rms);
+
 // --- E4 barge-in latency ----------------------------------------------------
 // E4 measures "user opens their mouth -> playback stops". The stop side was
 // already timestamped in the fetch task; this is the other half: a sharp onset

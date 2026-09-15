@@ -890,13 +890,27 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         if (!afe_click_result(&click_us, &duck_us, &latency_ms)) {
             return "done|no click detected since arming";
         }
-        char out[160];
+        // Carry the gate counters on both outcomes. On a miss they say which
+        // condition held the barge-in back; on a hit they give the margin it
+        // fired with, which is the only way to tell a comfortable trigger from
+        // one that barely made it.
+        uint32_t frames = 0, loud = 0, speech = 0, both = 0;
+        int32_t max_rms = 0;
+        afe_gate_stats(&frames, &loud, &speech, &both, &max_rms);
+        char out[240];
         if (latency_ms < 0) {
-            snprintf(out, sizeof(out), "done|click=%lld us, no barge-in yet",
-                     (long long)click_us);
+            snprintf(out, sizeof(out),
+                     "done|click=%lld us, no barge-in yet "
+                     "frames=%u loud=%u speech=%u both=%u max_rms=%d",
+                     (long long)click_us, (unsigned)frames, (unsigned)loud,
+                     (unsigned)speech, (unsigned)both, (int)max_rms);
         } else {
-            snprintf(out, sizeof(out), "done|latency=%d ms click=%lld duck=%lld",
-                     latency_ms, (long long)click_us, (long long)duck_us);
+            snprintf(out, sizeof(out),
+                     "done|latency=%d ms click=%lld duck=%lld "
+                     "frames=%u loud=%u speech=%u both=%u max_rms=%d",
+                     latency_ms, (long long)click_us, (long long)duck_us,
+                     (unsigned)frames, (unsigned)loud, (unsigned)speech,
+                     (unsigned)both, (int)max_rms);
         }
         return std::string(out);
     }
