@@ -88,7 +88,22 @@ def _mqtt_publish_command(device_id: str, command: dict[str, Any]) -> bool:
     try:
         client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
         client.loop_start()
-        info = client.publish(topic, json.dumps(command, ensure_ascii=False), qos=1, retain=True)
+        # retain=False deliberately. Each command gets its own topic, so a
+        # retained publish leaves one message per command on the broker
+        # forever unless the clear succeeds, and the device subscribes with a
+        # wildcard -- meaning every reconnect replays every command ever sent
+        # that was not cleared. Observed: twelve stale stop_audio commands
+        # arriving in one burst and killing whatever was playing, which read as
+        # barge-in failures and cost four firmware versions of VAD tuning to
+        # chase. It also explains the "minute-scale delivery": a new command
+        # queues behind the replayed backlog rather than being slow itself.
+        #
+        # retain is for last-known state, and a command is not state. Nothing
+        # is lost by dropping it: a publish that fails leaves the command
+        # "pending" and the heartbeat poll delivers it (see the dispatch path
+        # below), which is the path that was already carrying commands whenever
+        # MQTT was unavailable.
+        info = client.publish(topic, json.dumps(command, ensure_ascii=False), qos=1, retain=False)
         info.wait_for_publish(timeout=5)
         return info.rc == mqtt.MQTT_ERR_SUCCESS
     except Exception as exc:
