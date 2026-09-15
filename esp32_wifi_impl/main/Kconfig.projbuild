@@ -114,7 +114,7 @@ config AEC_VAD_MODE
 
 config AEC_VAD_DELAY_MS
     int "AFE vad_delay_ms (esp-sr default 128)"
-    default 32
+    default 128
     help
       esp-sr describes this as "the delay of the first speech frame", to be
       raised "if you find vad cache can not cover all speech". It defaults to
@@ -127,8 +127,13 @@ config AEC_VAD_DELAY_MS
       work was also an unset esp-sr default, so assuming this one is
       irreducible pipeline cost would be a guess.
 
-      If lowering it costs recognition of speech onsets, E2b and E3 will show
-      it -- both are ASR comparisons and both must be re-run after changing it.
+      Measured at 32 ms and it is WORSE: E4 gave 246 ms and 1307 ms, erratic.
+      The hypothesis was wrong. This is a lookback cache for the start of
+      speech, not a decision delay -- esp-sr's own wording, "if you find vad
+      cache can not cover all speech, please increase this value", says as
+      much. Shrinking it makes the VAD miss onsets, so it needs MORE speech
+      before it fires and the latency goes up. Back to the 128 ms default; the
+      residue in E4's budget is genuine pipeline cost.
 
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
