@@ -375,6 +375,16 @@ static std::string device_state() {
     // T3.2: how long the last stop actually took to silence the speaker. E4's
     // t_duck is the decision instant, not this one, so a healthy-looking
     // latency can still leave the robot audibly talking.
+    // Reference-channel level, so the clipping condition can be checked without
+    // a serial console. Measured at -3.9 dBFS at volume 100, which leaves under
+    // 4 dB of headroom, and clipping breaks the linearity the AEC relies on.
+    {
+        float ref_dbfs = -120.0f;
+        uint32_t clip_frames = 0;
+        afe_ref_level(&ref_dbfs, &clip_frames);
+        cJSON_AddNumberToObject(state, "ref_peak_dbfs", (double)ref_dbfs);
+        cJSON_AddNumberToObject(state, "ref_clip_frames", (double)clip_frames);
+    }
     cJSON_AddNumberToObject(state, "stop_latency_ms",
                             s_audio_player != nullptr ? s_audio_player->last_stop_latency_ms() : -1);
     cJSON_AddBoolToObject(state, "mqtt_connected",

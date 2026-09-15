@@ -49,6 +49,10 @@ static StreamBufferHandle_t s_ref_ring;   // mono int16 reference samples
 // Runs on the RAW mic channel inside the feed task, i.e. before the AFE, so the
 // measured onset is not itself delayed by AEC/NS/VAD -- otherwise the latency
 // under test would be partly subtracted from the measurement.
+// Reference-channel peak tracking, reported through the heartbeat.
+static volatile int16_t  s_ref_peak = 0;
+static volatile uint32_t s_ref_clip_frames = 0;
+
 static volatile bool    s_click_armed = false;
 static volatile int64_t s_click_us = 0;   // 0 = nothing detected since arming
 static volatile int64_t s_click_duck_us = 0;
@@ -100,6 +104,16 @@ static uint32_t s_click_frames = 0;
 #define CLICK_TRIGGER_RATIO  (CONFIG_AEC_CLICK_TRIGGER_RATIO_X10 / 10.0f)
 #define CLICK_MIN_PEAK       2000    // absolute floor, keeps silence from firing
 #define CLICK_SEED_FRAMES    16      // let the envelope settle before arming fires
+
+bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames)
+{
+    const int16_t peak = s_ref_peak;
+    if (clip_frames) *clip_frames = s_ref_clip_frames;
+    if (peak <= 0) { if (peak_dbfs) *peak_dbfs = -120.0f; return false; }
+    if (peak_dbfs) *peak_dbfs = 20.0f * log10f((float)peak / 32767.0f);
+    s_ref_peak = 0;   // window resets on read, so each heartbeat reports its own
+    return true;
+}
 
 void afe_click_arm(void)
 {
@@ -340,7 +354,11 @@ static void feed_task(void *arg)
                 const int16_t a = r < 0 ? (int16_t)-r : r;
                 if (a > ref_peak) ref_peak = a;
             }
+            if (ref_peak > s_ref_peak) s_ref_peak = ref_peak;
             // -3 dBFS of full scale for int16.
+            if (ref_peak > 23197) {
+                s_ref_clip_frames++;
+            }
             if (ref_peak > 23197 && now - s_clip_log_us > 10000000) {
                 ESP_LOGW(TAG, "AEC reference near clipping: peak=%d (%.1f dBFS). "
                               "Lower the speaker volume; the AEC assumes a linear "

@@ -40,6 +40,15 @@ void afe_config_summary(char *buf, size_t n);
 void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples);
 void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
 
+// --- reference-channel level ------------------------------------------------
+// Peak seen on ch1 since the last read, in dBFS, plus how many frames have
+// crossed the clipping warning threshold since boot. Exposed because a value
+// that only reaches the UART cannot be checked on a headless board -- the same
+// limitation already hit with T3.2's dropped-ms figure and E4's latency, and
+// this is the third time, so it goes in the heartbeat rather than a log line.
+// Returns false if no playback has been observed yet.
+bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
+
 // --- E4 barge-in latency ----------------------------------------------------
 // E4 measures "user opens their mouth -> playback stops". The stop side was
 // already timestamped in the fetch task; this is the other half: a sharp onset
