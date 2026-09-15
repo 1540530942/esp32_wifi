@@ -411,7 +411,31 @@ static void fetch_task(void *arg)
 #if CONFIG_AEC_LOCAL_BARGEIN
         bool playing = playback_is_playing();
         bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
-        if (playing && past_grace && res->vad_state == VAD_SPEECH) {
+        // Level gate on the AFE's own output, which is the discriminator the
+        // duration knobs never had. Measured from the archives:
+        //
+        //   robot alone (E1 @vol80)   post_rms   8.5
+        //   human voice (E2b)         post_rms 218.6
+        //   double-talk (E3)          post_rms 181.2
+        //
+        // 21-26x apart, because the AEC removes the robot so thoroughly that
+        // E3's ASR reads only the human. A threshold at 40 sits ~4.5x clear of
+        // both. This is what vad_energy_threshold would do, except that field
+        // needs a neural VAD model and therefore a model partition; computing
+        // one frame's RMS here needs neither, and costs no latency because the
+        // frame is already in hand.
+        int32_t clean_rms = 0;
+        if (res->data && res->data_size >= 2) {
+            const int n = res->data_size / 2;
+            int64_t acc = 0;
+            for (int i = 0; i < n; i++) {
+                const int32_t v = res->data[i];
+                acc += (int64_t)v * v;
+            }
+            clean_rms = (int32_t)sqrt((double)acc / n);
+        }
+        const bool loud_enough = clean_rms >= CONFIG_AEC_BARGEIN_MIN_RMS;
+        if (playing && past_grace && loud_enough && res->vad_state == VAD_SPEECH) {
             if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked) {
                 // Timestamp in the device's own clock so barge-in latency can be
                 // measured without cross-device sync (E4).

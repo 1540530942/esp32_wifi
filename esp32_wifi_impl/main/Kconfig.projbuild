@@ -98,9 +98,29 @@ config AEC_BARGEIN_ONSET_GRACE_MS
       setting that satisfies both has to be demonstrated at full scope, not on
       one clip.
 
+config AEC_BARGEIN_MIN_RMS
+    int "Minimum AFE-output RMS for a barge-in to count"
+    default 40
+    help
+      A level test on the post-AEC signal, which is the dimension the duration
+      knobs could not separate. Measured from archived captures: the robot
+      alone leaves post_rms 8.5, a human voice gives 218.6 with no echo to
+      cancel and 181.2 during double-talk -- 21 to 26 times apart, because the
+      AEC removes the robot thoroughly enough that E3's ASR transcribes only
+      the human. 40 is near the geometric mean and clears both by ~4.5x.
+
+      This is what vad_energy_threshold does, and that field is unavailable
+      here: it only applies when a neural VAD model is loaded, which needs a
+      model partition this board's partition table does not have. One frame's
+      RMS needs neither, and costs no latency -- the frame has already been
+      computed by the time this runs.
+
+      With this gate holding E5, the VAD can go back to its fast settings for
+      E4 instead of trading one criterion against the other.
+
 config AEC_VAD_MODE
     int "AFE vad_mode 0..4 (higher rejects more non-speech)"
-    default 4
+    default 3
     help
       WebRTC VAD aggressiveness. 4 is the most willing to call something noise
       rather than speech, which is what E5 needs, and it costs no latency
@@ -137,7 +157,7 @@ config AEC_VAD_DELAY_MS
 
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
-    default 64
+    default 48
     help
       How much speech the AFE must hear before it reports VAD_SPEECH. The
       esp-sr default of 128 ms is most of the latency E4 could not account for.
