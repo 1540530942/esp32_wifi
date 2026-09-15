@@ -59,20 +59,27 @@ def main() -> int:
         # Command delivery drops turns often enough that a run can end with
         # three of five unplayed, which decides nothing. Retry until the device
         # actually starts, so the verdict rests on five turns.
-        for attempt in range(4):
-            ser.reset_input_buffer()
-            post({"params": {"name": name},
-                  "settings_override": {"voice_volume_percent": 80}})
-            waited = time.time() + 25
-            got_start = False
-            while time.time() < waited:
-                probe = ser.readline()
-                if probe and b"starting WAV playback" in probe:
-                    got_start = True
-                    break
-            if got_start:
+        # Send ONCE and wait. Re-posting on every timeout queues duplicate
+        # plays, and the run that did so reported turn04 as 37920 ms -- turn10's
+        # length -- because a later clip's completion line got matched to an
+        # earlier turn. Delivery is slow, not lost; give it room instead.
+        ser.reset_input_buffer()
+        post({"params": {"name": name},
+              "settings_override": {"voice_volume_percent": 80}})
+        # Delivery is minute-scale, not seconds. Serial caught the device
+        # executing a play command issued long enough earlier that the script
+        # had already written it off -- so "command not delivered" in earlier
+        # runs was really "delivered late", and a 60 s window threw away turns
+        # that would have played.
+        waited = time.time() + 180
+        got_start = False
+        while time.time() < waited:
+            probe = ser.readline()
+            if probe and b"starting WAV playback" in probe:
+                got_start = True
                 break
-            print(f"    {name}: 第 {attempt + 1} 次未启动，重试")
+        if not got_start:
+            print(f"    {name}: 60s 内未启动")
 
         deadline = time.time() + dur + 30
         played = None
