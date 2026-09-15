@@ -654,6 +654,133 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples,
     return ok;
 }
 
+struct EchoLoopCfg {
+    AudioPlayer* player;
+    std::string url;
+    int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol;
+};
+
+// Repeats the cycle until told to stop: every time the room falls quiet for the
+// configured stretch, the robot speaks again. "never_quiet" is not an error
+// here -- it just means nobody has stopped talking yet -- so the loop waits and
+// tries again rather than giving up.
+static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
+                                   int quiet_ms, int end_sil_ms, int max_rec_s,
+                                   int wait_s, int vol) {
+        // --- 1. wait for the room to be quiet -------------------------------
+        const int64_t t_wait0 = esp_timer_get_time();
+        while (afe_silence_ms() < quiet_ms) {
+            if ((esp_timer_get_time() - t_wait0) > (int64_t)wait_s * 1000000) {
+                return "failed|stage=never_quiet silence_ms=" +
+                       std::to_string((long long)afe_silence_ms());
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        const int64_t t_speak = esp_timer_get_time();
+
+        // --- 2. speak, until finished or interrupted ------------------------
+        if (player->play_wav_url(url.c_str(), (uint8_t)vol) != ESP_OK) {
+            return "failed|stage=speak_start";
+        }
+        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
+        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
+        // looks like from here. Anything else means the clip simply ended.
+        const bool interrupted = player->last_result() != ESP_OK;
+        const int spoke_ms = player->spk_played_ms();
+        if (!interrupted) {
+            return "done|spoke=" + std::to_string(spoke_ms) +
+                   "ms not_interrupted";
+        }
+
+        // --- 3. record the interrupter --------------------------------------
+        // The AFE's clean output, so what gets played back is the speaker with
+        // the robot's own voice already removed -- the demo is the AEC.
+        const size_t cap = (size_t)max_rec_s * 16000;
+        int16_t* bmic   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bref   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bclean = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        if (!bmic || !bref || !bclean) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "failed|stage=alloc";
+        }
+        afe_capture_begin(bmic, bref, bclean, cap);
+        const int64_t t_rec0 = esp_timer_get_time();
+        // Record until the speaker has been quiet for end_silence_ms. Requiring
+        // speech to have been heard first matters: the barge-in fires on the
+        // first qualifying frame, so at this instant the silence timer can
+        // still read above the threshold and the recording would close
+        // immediately, capturing nothing.
+        bool heard = false;
+        while (true) {
+            const int64_t elapsed = esp_timer_get_time() - t_rec0;
+            if (elapsed > (int64_t)max_rec_s * 1000000) break;
+            const int64_t sil = afe_silence_ms();
+            if (!heard && sil < 300) heard = true;
+            if (heard && sil >= end_sil_ms) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        size_t nm = 0, nr = 0, nc = 0;
+        afe_capture_end(&nm, &nr, &nc);
+        const int rec_ms = (int)((esp_timer_get_time() - t_rec0) / 1000);
+
+        if (!heard || nc < 16000 / 4) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "done|interrupted spoke=" + std::to_string(spoke_ms) +
+                   "ms but recorded nothing (clean=" + std::to_string((int)nc) + ")";
+        }
+
+        // --- 3b. bring it up to a listenable level ---------------------------
+        // The AFE's output is whatever the microphone picked up, and a person
+        // speaking a metre away lands around -23 dBFS peak / -40 dBFS RMS. The
+        // source material the robot plays is -8.4 / -25.8, so replaying the
+        // recording untouched is about 15 dB quieter than everything else and
+        // sounds broken even though nothing is wrong with it.
+        //
+        // Peak-normalise to -6 dBFS: loud enough to match the robot's own
+        // voice, with headroom left for the speech peaks that a short window
+        // may not contain. The gain is capped because a window with no speech
+        // in it has a tiny peak, and normalising that would just amplify the
+        // noise floor to full scale.
+        int32_t peak = 0;
+        for (size_t i = 0; i < nc; i++) {
+            const int32_t v = bclean[i] < 0 ? -bclean[i] : bclean[i];
+            if (v > peak) peak = v;
+        }
+        const int32_t target = 16422;              // -6 dBFS
+        int gain_q8 = 256;
+        if (peak > 0) {
+            gain_q8 = (int)((int64_t)target * 256 / peak);
+            if (gain_q8 < 256) gain_q8 = 256;      // never attenuate
+            if (gain_q8 > 4096) gain_q8 = 4096;    // +24 dB ceiling
+        }
+        if (gain_q8 > 256) {
+            for (size_t i = 0; i < nc; i++) {
+                int32_t v = ((int32_t)bclean[i] * gain_q8) >> 8;
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
+                bclean[i] = (int16_t)v;
+            }
+        }
+
+        // --- 4. hand it back -------------------------------------------------
+        // play=1: the hub answers the upload with a play_audio for this file,
+        // so the recording comes back out of the speaker on its own.
+        char fname[64];
+        snprintf(fname, sizeof(fname), "echo_%lld.wav",
+                 (long long)(esp_timer_get_time() / 1000));
+        const bool up = aec_upload_wav(fname, bclean, nc, true);
+        heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+
+        char out[224];
+        snprintf(out, sizeof(out),
+                 "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
+                 "samples=%u peak=%d gain=%.1fx upload=%d file=%s",
+                 (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
+                 (unsigned)nc, (int)peak, gain_q8 / 256.0, up ? 1 : 0, fname);
+        return std::string(out);
+
+}
+
 static void echo_loop_task(void* arg) {
     auto* cfg = static_cast<EchoLoopCfg*>(arg);
     while (!s_echo_loop_stop) {
@@ -963,133 +1090,6 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     }
 // One cycle of the echo demo. Shared by the one-shot command and the loop task
 // so the two can never drift apart.
-
-struct EchoLoopCfg {
-    AudioPlayer* player;
-    std::string url;
-    int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol;
-};
-
-// Repeats the cycle until told to stop: every time the room falls quiet for the
-// configured stretch, the robot speaks again. "never_quiet" is not an error
-// here -- it just means nobody has stopped talking yet -- so the loop waits and
-// tries again rather than giving up.
-static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
-                                   int quiet_ms, int end_sil_ms, int max_rec_s,
-                                   int wait_s, int vol) {
-        // --- 1. wait for the room to be quiet -------------------------------
-        const int64_t t_wait0 = esp_timer_get_time();
-        while (afe_silence_ms() < quiet_ms) {
-            if ((esp_timer_get_time() - t_wait0) > (int64_t)wait_s * 1000000) {
-                return "failed|stage=never_quiet silence_ms=" +
-                       std::to_string((long long)afe_silence_ms());
-            }
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        const int64_t t_speak = esp_timer_get_time();
-
-        // --- 2. speak, until finished or interrupted ------------------------
-        if (player->play_wav_url(url.c_str(), (uint8_t)vol) != ESP_OK) {
-            return "failed|stage=speak_start";
-        }
-        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
-        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
-        // looks like from here. Anything else means the clip simply ended.
-        const bool interrupted = player->last_result() != ESP_OK;
-        const int spoke_ms = player->spk_played_ms();
-        if (!interrupted) {
-            return "done|spoke=" + std::to_string(spoke_ms) +
-                   "ms not_interrupted";
-        }
-
-        // --- 3. record the interrupter --------------------------------------
-        // The AFE's clean output, so what gets played back is the speaker with
-        // the robot's own voice already removed -- the demo is the AEC.
-        const size_t cap = (size_t)max_rec_s * 16000;
-        int16_t* bmic   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
-        int16_t* bref   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
-        int16_t* bclean = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
-        if (!bmic || !bref || !bclean) {
-            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
-            return "failed|stage=alloc";
-        }
-        afe_capture_begin(bmic, bref, bclean, cap);
-        const int64_t t_rec0 = esp_timer_get_time();
-        // Record until the speaker has been quiet for end_silence_ms. Requiring
-        // speech to have been heard first matters: the barge-in fires on the
-        // first qualifying frame, so at this instant the silence timer can
-        // still read above the threshold and the recording would close
-        // immediately, capturing nothing.
-        bool heard = false;
-        while (true) {
-            const int64_t elapsed = esp_timer_get_time() - t_rec0;
-            if (elapsed > (int64_t)max_rec_s * 1000000) break;
-            const int64_t sil = afe_silence_ms();
-            if (!heard && sil < 300) heard = true;
-            if (heard && sil >= end_sil_ms) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        size_t nm = 0, nr = 0, nc = 0;
-        afe_capture_end(&nm, &nr, &nc);
-        const int rec_ms = (int)((esp_timer_get_time() - t_rec0) / 1000);
-
-        if (!heard || nc < 16000 / 4) {
-            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
-            return "done|interrupted spoke=" + std::to_string(spoke_ms) +
-                   "ms but recorded nothing (clean=" + std::to_string((int)nc) + ")";
-        }
-
-        // --- 3b. bring it up to a listenable level ---------------------------
-        // The AFE's output is whatever the microphone picked up, and a person
-        // speaking a metre away lands around -23 dBFS peak / -40 dBFS RMS. The
-        // source material the robot plays is -8.4 / -25.8, so replaying the
-        // recording untouched is about 15 dB quieter than everything else and
-        // sounds broken even though nothing is wrong with it.
-        //
-        // Peak-normalise to -6 dBFS: loud enough to match the robot's own
-        // voice, with headroom left for the speech peaks that a short window
-        // may not contain. The gain is capped because a window with no speech
-        // in it has a tiny peak, and normalising that would just amplify the
-        // noise floor to full scale.
-        int32_t peak = 0;
-        for (size_t i = 0; i < nc; i++) {
-            const int32_t v = bclean[i] < 0 ? -bclean[i] : bclean[i];
-            if (v > peak) peak = v;
-        }
-        const int32_t target = 16422;              // -6 dBFS
-        int gain_q8 = 256;
-        if (peak > 0) {
-            gain_q8 = (int)((int64_t)target * 256 / peak);
-            if (gain_q8 < 256) gain_q8 = 256;      // never attenuate
-            if (gain_q8 > 4096) gain_q8 = 4096;    // +24 dB ceiling
-        }
-        if (gain_q8 > 256) {
-            for (size_t i = 0; i < nc; i++) {
-                int32_t v = ((int32_t)bclean[i] * gain_q8) >> 8;
-                if (v > 32767) v = 32767;
-                if (v < -32768) v = -32768;
-                bclean[i] = (int16_t)v;
-            }
-        }
-
-        // --- 4. hand it back -------------------------------------------------
-        // play=1: the hub answers the upload with a play_audio for this file,
-        // so the recording comes back out of the speaker on its own.
-        char fname[64];
-        snprintf(fname, sizeof(fname), "echo_%lld.wav",
-                 (long long)(esp_timer_get_time() / 1000));
-        const bool up = aec_upload_wav(fname, bclean, nc, true);
-        heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
-
-        char out[224];
-        snprintf(out, sizeof(out),
-                 "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
-                 "samples=%u peak=%d gain=%.1fx upload=%d file=%s",
-                 (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
-                 (unsigned)nc, (int)peak, gain_q8 / 256.0, up ? 1 : 0, fname);
-        return std::string(out);
-
-}
 
     if (cmd.action == "echo_demo") {
         // One full turn of the interaction, run entirely on the device:
