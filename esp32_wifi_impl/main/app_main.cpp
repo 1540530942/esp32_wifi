@@ -763,18 +763,43 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         }
 
         // --- 4. hand it back -------------------------------------------------
-        // play=1: the hub answers the upload with a play_audio for this file,
-        // so the recording comes back out of the speaker on its own.
+        // Played straight from the buffer rather than round-tripping through
+        // the hub. The upload-with-play=1 route worked twice and then failed
+        // with "wav_start ESP_ERR_INVALID_STATE": the replay is delivered on
+        // the next heartbeat and has to win a race against the player
+        // releasing busy_ from the turn that was just interrupted. When it
+        // lost, nothing came out of the speaker at all and the only evidence
+        // was a failed command nobody was reading -- the person in the room
+        // simply heard silence.
+        //
+        // The samples are already in PSRAM, so there is nothing to win: write
+        // them to the codec directly. That also removes the upload and the
+        // round trip from the gap between "you stopped talking" and "you hear
+        // yourself", which is the number this demo is really about.
+        //
+        // Writing directly bypasses AudioPlayer, so the barge-in detector is
+        // not armed during the replay. That is the behaviour we want here: the
+        // robot should not treat its own replay as something to interrupt.
+        board_set_volume(vol);
+        board_pa_enable(true);
+        for (size_t off = 0; off < nc; off += 256) {
+            const size_t n = (nc - off) > 256 ? 256 : (nc - off);
+            board_spk_write(bclean + off, n * sizeof(int16_t));
+        }
+        vTaskDelay(pdMS_TO_TICKS(150));   // let the DMA ring drain
+        board_pa_enable(false);
+
+        // Still uploaded, with play=0, so the turn can be listened to later.
         char fname[64];
         snprintf(fname, sizeof(fname), "echo_%lld.wav",
                  (long long)(esp_timer_get_time() / 1000));
-        const bool up = aec_upload_wav(fname, bclean, nc, true);
+        const bool up = aec_upload_wav(fname, bclean, nc, false);
         heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
 
         char out[224];
         snprintf(out, sizeof(out),
                  "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
-                 "samples=%u peak=%d gain=%.1fx upload=%d file=%s",
+                 "samples=%u peak=%d gain=%.1fx replayed=1 upload=%d file=%s",
                  (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
                  (unsigned)nc, (int)peak, gain_q8 / 256.0, up ? 1 : 0, fname);
         return std::string(out);
