@@ -495,6 +495,13 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     // T3.1 asks for roughly 48 ms to declare speech; 64 ms is the closest this
     // knob allows while staying above its 32 ms floor.
     cfg->vad_min_speech_ms = CONFIG_AEC_VAD_MIN_SPEECH_MS;
+    // Also defaults to 128 ms and was never set. After accounting for
+    // vad_min_speech_ms (64), the single sustained frame (16) and the measured
+    // stop (24), E4's 232 ms leaves ~128 ms unexplained -- the same number.
+    // Worth testing directly rather than assuming it is irreducible pipeline
+    // cost, since the last unexplained 128 ms turned out to be exactly this
+    // kind of unset default.
+    cfg->vad_delay_ms = CONFIG_AEC_VAD_DELAY_MS;
     // "If true, the playback will be muted for vad detection" -- esp-sr's own
     // answer to the problem E5 keeps failing on, and it defaults to false.
     //

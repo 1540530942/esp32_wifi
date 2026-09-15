@@ -112,6 +112,24 @@ config AEC_VAD_MODE
       at 64 ms), so the duration knob alone has no value that satisfies both
       criteria and the threshold has to move instead.
 
+config AEC_VAD_DELAY_MS
+    int "AFE vad_delay_ms (esp-sr default 128)"
+    default 32
+    help
+      esp-sr describes this as "the delay of the first speech frame", to be
+      raised "if you find vad cache can not cover all speech". It defaults to
+      128 ms and the firmware never set it.
+
+      It is worth a measurement because 128 ms is precisely the residue E4
+      cannot otherwise account for: at mode 4 with vad_min_speech_ms=64 the
+      total is 232 ms, of which 64 + 16 (one sustained frame) + 24 (the
+      measured stop) = 104 ms is known. The last unexplained 128 ms in this
+      work was also an unset esp-sr default, so assuming this one is
+      irreducible pipeline cost would be a guess.
+
+      If lowering it costs recognition of speech onsets, E2b and E3 will show
+      it -- both are ASR comparisons and both must be re-run after changing it.
+
 config AEC_VAD_MIN_SPEECH_MS
     int "AFE vad_min_speech_ms (floor 32, esp-sr default 128)"
     default 64
