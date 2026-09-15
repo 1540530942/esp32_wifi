@@ -577,7 +577,8 @@ static void aec_wav_header(uint8_t* h, uint32_t data_bytes, uint32_t rate) {
 static int32_t s_upload_leak = 0;
 static int32_t s_capture_leak = 0;
 
-static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples) {
+static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples,
+                           bool play_back = false) {
     if (!pcm || samples == 0) return false;
     const int32_t heap_in = (int32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const size_t data_bytes = samples * sizeof(int16_t);
@@ -592,7 +593,13 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples)
     const size_t total = pre.size() + sizeof(hdr) + data_bytes + post.size();
 
     esp_http_client_config_t cfg = {};
-    cfg.url = "http://110.40.154.41/devices/api/device/" CONFIG_DEVICE_ID "/upload_audio?play=0";
+    // play=1 makes device_hub send a play_audio for the file it just received,
+    // which is how the echo demo gets the recording back out of the speaker
+    // without needing a second round trip of its own.
+    const std::string upload_url =
+        std::string("http://110.40.154.41/devices/api/device/" CONFIG_DEVICE_ID
+                    "/upload_audio?play=") + (play_back ? "1" : "0");
+    cfg.url = upload_url.c_str();
     cfg.method = HTTP_METHOD_POST;
     // A 20 s capture is 640 KB and uploads inside 30 s; a 30 s one is 960 KB
     // and does not, which showed up as uploads=0/0/0 with the capture itself
@@ -912,6 +919,111 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
                      (unsigned)frames, (unsigned)loud, (unsigned)speech,
                      (unsigned)both, (int)max_rms);
         }
+        return std::string(out);
+    }
+    if (cmd.action == "echo_demo") {
+        // One full turn of the interaction, run entirely on the device:
+        //   wait for the room to go quiet -> speak -> get interrupted -> record
+        //   the interrupter -> play their words back.
+        //
+        // On-device rather than cloud-orchestrated because every transition
+        // here is driven by something only the device can see (its own VAD and
+        // its own playback state). Routing those through the hub would add a
+        // round trip to each edge and make the timing a property of the network
+        // rather than of the audio.
+        cJSON* a = cJSON_Parse(cmd.args_json.c_str());
+        auto num = [&](const char* k, int dflt, int lo, int hi) {
+            cJSON* it = a ? cJSON_GetObjectItem(a, k) : nullptr;
+            return cJSON_IsNumber(it) ? std::max(lo, std::min(hi, (int)it->valuedouble)) : dflt;
+        };
+        const int quiet_ms   = num("quiet_ms", 5000, 500, 30000);
+        const int end_sil_ms = num("end_silence_ms", 800, 200, 5000);
+        const int max_rec_s  = num("max_record_s", 15, 2, 25);
+        const int wait_s     = num("wait_s", 60, 5, 180);
+        const int vol        = num("volume", 80, 0, 100);
+        cJSON* u = a ? cJSON_GetObjectItem(a, "url") : nullptr;
+        std::string url = cJSON_IsString(u) ? u->valuestring :
+            "http://192.168.1.16:8080/esp32/turn06_assistant.wav";
+        if (a) cJSON_Delete(a);
+        if (!is_local_audio_url(url.c_str())) return "failed|stage=url_not_allowed";
+
+        // --- 1. wait for the room to be quiet -------------------------------
+        const int64_t t_wait0 = esp_timer_get_time();
+        while (afe_silence_ms() < quiet_ms) {
+            if ((esp_timer_get_time() - t_wait0) > (int64_t)wait_s * 1000000) {
+                return "failed|stage=never_quiet silence_ms=" +
+                       std::to_string((long long)afe_silence_ms());
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        const int64_t t_speak = esp_timer_get_time();
+
+        // --- 2. speak, until finished or interrupted ------------------------
+        if (player->play_wav_url(url.c_str(), (uint8_t)vol) != ESP_OK) {
+            return "failed|stage=speak_start";
+        }
+        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
+        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
+        // looks like from here. Anything else means the clip simply ended.
+        const bool interrupted = player->last_result() != ESP_OK;
+        const int spoke_ms = player->spk_played_ms();
+        if (!interrupted) {
+            return "done|spoke=" + std::to_string(spoke_ms) +
+                   "ms not_interrupted";
+        }
+
+        // --- 3. record the interrupter --------------------------------------
+        // The AFE's clean output, so what gets played back is the speaker with
+        // the robot's own voice already removed -- the demo is the AEC.
+        const size_t cap = (size_t)max_rec_s * 16000;
+        int16_t* bmic   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bref   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        int16_t* bclean = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
+        if (!bmic || !bref || !bclean) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "failed|stage=alloc";
+        }
+        afe_capture_begin(bmic, bref, bclean, cap);
+        const int64_t t_rec0 = esp_timer_get_time();
+        // Record until the speaker has been quiet for end_silence_ms. Requiring
+        // speech to have been heard first matters: the barge-in fires on the
+        // first qualifying frame, so at this instant the silence timer can
+        // still read above the threshold and the recording would close
+        // immediately, capturing nothing.
+        bool heard = false;
+        while (true) {
+            const int64_t elapsed = esp_timer_get_time() - t_rec0;
+            if (elapsed > (int64_t)max_rec_s * 1000000) break;
+            const int64_t sil = afe_silence_ms();
+            if (!heard && sil < 300) heard = true;
+            if (heard && sil >= end_sil_ms) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        size_t nm = 0, nr = 0, nc = 0;
+        afe_capture_end(&nm, &nr, &nc);
+        const int rec_ms = (int)((esp_timer_get_time() - t_rec0) / 1000);
+
+        if (!heard || nc < 16000 / 4) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "done|interrupted spoke=" + std::to_string(spoke_ms) +
+                   "ms but recorded nothing (clean=" + std::to_string((int)nc) + ")";
+        }
+
+        // --- 4. hand it back -------------------------------------------------
+        // play=1: the hub answers the upload with a play_audio for this file,
+        // so the recording comes back out of the speaker on its own.
+        char fname[64];
+        snprintf(fname, sizeof(fname), "echo_%lld.wav",
+                 (long long)(esp_timer_get_time() / 1000));
+        const bool up = aec_upload_wav(fname, bclean, nc, true);
+        heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+
+        char out[224];
+        snprintf(out, sizeof(out),
+                 "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
+                 "samples=%u upload=%d file=%s",
+                 (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
+                 (unsigned)nc, up ? 1 : 0, fname);
         return std::string(out);
     }
     if (cmd.action == "aec_probe") {

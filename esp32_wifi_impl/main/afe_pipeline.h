@@ -49,6 +49,14 @@ void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
 // Returns false if no playback has been observed yet.
 bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 
+// --- silence timer ----------------------------------------------------------
+// Milliseconds since the last frame that was unambiguously speech (VAD said
+// speech AND it cleared the barge-in level gate). Reads as time-since-boot
+// until the first speech is heard. Drives both halves of the echo demo:
+// "the room has been quiet for 5s, start talking" and "the speaker stopped,
+// play it back".
+int64_t afe_silence_ms(void);
+
 // --- barge-in miss attribution ----------------------------------------------
 // Counts, since the last afe_click_arm(), how many frames each half of the
 // barge-in gate admitted while the robot was speaking and past the onset

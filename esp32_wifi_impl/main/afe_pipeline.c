@@ -123,11 +123,27 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames)
 // loudest AFE output seen -- enough to tell "the AEC suppressed the user"
 // (clean_rms never reached the threshold) from "the VAD never called it
 // speech", which have opposite fixes.
+// Wall-clock of the last frame that was unambiguously someone talking: the
+// VAD called it speech AND it cleared the level gate. Both halves are needed --
+// the VAD alone flickers on room noise, and the level alone rises for any
+// sound. This is what "the room has been quiet for N seconds" and "the speaker
+// has finished" are both derived from; they are the same measurement read at
+// two different thresholds.
+static int64_t s_last_speech_us;
+
 static uint32_t s_gate_frames;      // frames examined while playing & past grace
 static uint32_t s_gate_loud;        // ... of those, clean_rms >= threshold
 static uint32_t s_gate_speech;      // ... of those, VAD said SPEECH
 static uint32_t s_gate_both;        // ... of those, both at once
 static int32_t  s_gate_max_rms;     // loudest AFE frame seen in the window
+
+int64_t afe_silence_ms(void)
+{
+    // Before any speech has ever been heard, s_last_speech_us is 0 and this
+    // reports the time since boot, which is the honest answer: the room has
+    // been quiet the whole time.
+    return (esp_timer_get_time() - s_last_speech_us) / 1000;
+}
 
 void afe_gate_stats(uint32_t *frames, uint32_t *loud, uint32_t *speech,
                     uint32_t *both, int32_t *max_rms)
@@ -513,6 +529,10 @@ static void fetch_task(void *arg)
         }
         const bool loud_enough = clean_rms >= CONFIG_AEC_BARGEIN_MIN_RMS;
         const bool is_speech = res->vad_state == VAD_SPEECH;
+        // Tracked whether or not the robot is speaking: the silence timer is
+        // needed most when it is not (waiting for the room to go quiet, and
+        // waiting for the user to finish).
+        if (loud_enough && is_speech) s_last_speech_us = esp_timer_get_time();
         if (playing && past_grace) {
             s_gate_frames++;
             if (clean_rms > s_gate_max_rms) s_gate_max_rms = clean_rms;
