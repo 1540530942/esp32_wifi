@@ -100,14 +100,31 @@ config AEC_BARGEIN_ONSET_GRACE_MS
 
 config AEC_BARGEIN_MIN_RMS
     int "Minimum AFE-output RMS for a barge-in to count"
-    default 40
+    default 150
     help
       A level test on the post-AEC signal, which is the dimension the duration
-      knobs could not separate. Measured from archived captures: the robot
-      alone leaves post_rms 8.5, a human voice gives 218.6 with no echo to
-      cancel and 181.2 during double-talk -- 21 to 26 times apart, because the
-      AEC removes the robot thoroughly enough that E3's ASR transcribes only
-      the human. 40 is near the geometric mean and clears both by ~4.5x.
+      knobs could not separate.
+
+      This was 40, justified by comparing MEAN RMS over a window: 8.5 for the
+      robot alone against 218.6 for a human, "~4.5x clear of both". That is the
+      wrong statistic. The gate tests EVERY frame, so what matters is the upper
+      tail of the robot-alone distribution, and measured per frame (512 samples,
+      32 ms) that tail is nowhere near 8.5:
+
+        robot alone, per-turn peak over 20 turns:
+          0 0 0 0 14 16 20 21 22 29 30 30 30 30 32 37 60 67 73 94
+        human, peak per 4 s utterance window (15 windows):
+          357 462 498 634 722 744 795 841 911 932 1234 1248 1300 1583 1662
+
+      Four of twenty robot-only turns crossed 40 and two of them fired, which
+      is E5's false-barge-in rate. The classes separate cleanly between 94 and
+      357, so 150 sits 1.6x above the observed robot maximum and 2.4x below the
+      observed human minimum -- chosen from distributions rather than from a
+      pair of numbers.
+
+      It does not fix everything. One recorded false trigger reached max_rms
+      1073, above the human minimum, and no level threshold can separate that:
+      for that frame the AEC had failed outright rather than leaked.
 
       This is what vad_energy_threshold does, and that field is unavailable
       here: it only applies when a neural VAD model is loaded, which needs a

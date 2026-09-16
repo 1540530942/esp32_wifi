@@ -535,17 +535,18 @@ static void fetch_task(void *arg)
         bool playing = playback_is_playing();
         bool past_grace = playback_turn_age_ms() > CONFIG_AEC_BARGEIN_ONSET_GRACE_MS;
         // Level gate on the AFE's own output, which is the discriminator the
-        // duration knobs never had. Measured from the archives:
+        // duration knobs never had.
         //
-        //   robot alone (E1 @vol80)   post_rms   8.5
-        //   human voice (E2b)         post_rms 218.6
-        //   double-talk (E3)          post_rms 181.2
+        // The threshold is chosen from the two per-frame distributions, not
+        // from a pair of averages -- see AEC_BARGEIN_MIN_RMS in Kconfig. The
+        // earlier value of 40 came from comparing mean RMS over a window (8.5
+        // robot, 218.6 human) while this test runs on every frame, and the
+        // robot-alone per-turn peak reaches 94, which is why E5 saw false
+        // triggers.
         //
-        // 21-26x apart, because the AEC removes the robot so thoroughly that
-        // E3's ASR reads only the human. A threshold at 40 sits ~4.5x clear of
-        // both. This is what vad_energy_threshold would do, except that field
-        // needs a neural VAD model and therefore a model partition; computing
-        // one frame's RMS here needs neither, and costs no latency because the
+        // This is what vad_energy_threshold would do, except that field needs a
+        // neural VAD model and therefore a model partition; computing one
+        // frame's RMS here needs neither, and costs no latency because the
         // frame is already in hand.
         int32_t clean_rms = 0;
         if (res->data && res->data_size >= 2) {

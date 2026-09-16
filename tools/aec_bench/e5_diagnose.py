@@ -68,6 +68,7 @@ def main():
     back_to_back = "--back-to-back" in sys.argv
     cuts = 0
     played = 0
+    maxima = []
     for r in range(rounds):
         print(f"\n=== 第 {r+1}/{rounds} 轮 ===")
         for name, expect in TURNS:
@@ -95,11 +96,27 @@ def main():
                     break
                 time.sleep(2)
             played += 1
+            # Read the counters on EVERY turn, not just cut ones.
+            #
+            # The offline distribution from the archived captures tops out at a
+            # per-frame RMS of 51 with the robot alone, while live cuts report
+            # 151 and 1073. The captures are not wrong -- they total 83s and the
+            # event happens about once per 1200s, so catching one was a 7%
+            # proposition. The tail is the whole question and the captures have
+            # none of it.
+            #
+            # These counters need no capture, no upload and have no 30s ceiling,
+            # so every turn contributes its maximum. That is the cheap way to
+            # get the tail.
+            stats = ack(post({"action": "click_result"}).get("command_id", ""))
+            keep = " ".join(w for w in stats.split() if w.split("=")[0] in
+                            ("frames", "loud", "speech", "both", "max_rms"))
+            mx = next((int(w.split("=")[1]) for w in stats.split()
+                       if w.startswith("max_rms=")), None)
+            if mx is not None:
+                maxima.append(mx)
             if status and status.get("status") == "failed":
                 cuts += 1
-                stats = ack(post({"action": "click_result"}).get("command_id", ""))
-                keep = " ".join(w for w in stats.split() if w.split("=")[0] in
-                                ("frames", "loud", "speech", "both", "max_rms"))
                 if not keep:
                     # Older firmware dropped the counters on the no-click path,
                     # which is every E5 cut since the Pi is silent by
@@ -109,8 +126,18 @@ def main():
                 print(f"  {name}: **被切断**  {status.get('message','')[:40]}")
                 print(f"      门限归因: {keep}")
             else:
-                print(f"  {name}: 完整")
+                print(f"  {name}: 完整   max_rms={mx}")
     print(f"\n{played} 段里被切 {cuts} 段")
+    if maxima:
+        maxima.sort()
+        n = len(maxima)
+        def pc(q):
+            return maxima[min(n - 1, int(q * n / 100))]
+        print(f"每轮 max_rms 分布（n={n}）：最小 {maxima[0]}  中位 {pc(50)}  "
+              f"p90 {pc(90)}  最大 {maxima[-1]}")
+        over = sum(1 for m in maxima if m >= 40)
+        print(f"  其中 {over}/{n} 轮的峰值越过了当前门限 40")
+        print(f"  全部: {maxima}")
     return 0
 
 
