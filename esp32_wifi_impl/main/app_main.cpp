@@ -128,6 +128,9 @@ static std::string read_es7210_gain_regs(AudioPlayer* player) {
 // A handler that never returns would hold the single mqtt_cmd worker forever,
 // which is exactly the failure that made cloud stop_audio useless when commands
 // moved onto MQTT -- there is no reason to reintroduce it deliberately.
+// Result of the boot-time reference-level self-check, carried in the heartbeat
+// because this board has no serial console in normal use.
+static char s_ref_selftest[48] = "(not run)";
 static volatile bool s_echo_loop_on = false;
 static volatile bool s_echo_loop_stop = false;
 static volatile uint32_t s_echo_cycles = 0;    // turns the robot has spoken
@@ -399,6 +402,7 @@ static std::string device_state() {
     // Echo-loop progress. The loop runs unattended for minutes at a time and
     // there is no serial console on this board, so without these the only
     // evidence it is alive is audio in the room.
+    cJSON_AddStringToObject(state, "ref_selftest", s_ref_selftest);
     cJSON_AddBoolToObject(state, "echo_loop", s_echo_loop_on);
     cJSON_AddNumberToObject(state, "echo_cycles", (double)s_echo_cycles);
     cJSON_AddNumberToObject(state, "echo_replies", (double)s_echo_replies);
@@ -1497,7 +1501,47 @@ extern "C" void app_main() {
     if (mqtt.start() != ESP_OK) {
         ESP_LOGW(TAG, "MQTT control start failed; HTTP heartbeat remains active");
     }
+    // --- boot self-check on the reference channel ---------------------------
+    // The task list suggests playing a short signal at startup and warning if
+    // the ch1 peak is out of range. No extra signal is needed: the boot
+    // announcement is already audio through the same speaker, so it doubles as
+    // the stimulus.
+    //
+    // Why this is worth having: the failure it catches is silent. A reference
+    // that is too hot clips, which breaks the linearity the AEC depends on; one
+    // that is too quiet gives the filter nothing to work with. Either way the
+    // room sounds normal and the only symptom is that barge-in stops working
+    // once somebody is actually talking to it -- discovered, if ever, in use.
+    //
+    // Band measured on this hardware with real speech (see the volume sweep in
+    // docs/logs): peak is -9.0 dBFS at volume 80 and -6.4 at 85, both inside
+    // T1.3's -12..-6; it reaches -3.9 at 90 and -1.9 at 100, where the clipping
+    // counter starts moving. The check is deliberately wider than T1.3 -- it is
+    // looking for a broken setup, not for calibration drift.
+    afe_ref_level(nullptr, nullptr);          // clear the running peak
     hub.boot_announce();
+    {
+        float peak = -120.0f;
+        uint32_t clipped = 0;
+        if (afe_ref_level(&peak, &clipped)) {
+            const char* verdict = peak > -3.0f  ? "TOO HOT (clipping risk)"
+                                : peak > -6.0f  ? "hot"
+                                : peak < -20.0f ? "TOO QUIET"
+                                : peak < -12.0f ? "quiet"
+                                                : "ok";
+            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "%s peak=%.1f", verdict, peak);
+            if (peak > -3.0f || peak < -20.0f) {
+                ESP_LOGW(TAG, "reference self-check: %s -- AEC will not behave; "
+                              "T1.3 wants -12..-6 dBFS", s_ref_selftest);
+            } else {
+                ESP_LOGI(TAG, "reference self-check: %s", s_ref_selftest);
+            }
+        } else {
+            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "no playback observed");
+            ESP_LOGW(TAG, "reference self-check: the announcement produced no "
+                          "reference signal at all");
+        }
+    }
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
             hub.heartbeat();
