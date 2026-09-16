@@ -1066,7 +1066,10 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         return std::string(msg);
     }
     if (cmd.action == "aec_config") {
-        char sum[160];
+        // Must not be smaller than afe_pipeline's own summary buffer, or the
+        // reply is silently truncated -- which is what hid the chunk figures
+        // this readback was added to expose.
+        char sum[420];
         afe_config_summary(sum, sizeof(sum));
         return std::string("done|") + sum;
     }
