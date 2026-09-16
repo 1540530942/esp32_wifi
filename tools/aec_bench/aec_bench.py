@@ -130,8 +130,18 @@ def pack_stereo(mic: Path, clean: Path, out: Path):
     return n / rate, len(a), len(b)
 
 
-def analyse(stereo: Path, settle_s=1.0):
-    """ERLE、收敛时间、分频段 —— 全部离线算，同一份录音可反复分析。"""
+def analyse(stereo: Path, settle_s=1.0, capture_settle_s=0.0):
+    """ERLE、收敛时间、分频段 —— 全部离线算，同一份录音可反复分析。
+
+    capture_settle_s 是**固件侧**在开始录音前已经播放的秒数（aec_capture 的
+    settle 参数）。收敛时间只有在它为 0 时才有意义：固件先播 settle 秒再开录，
+    滤波器在第一个样本落盘前就已经收敛了，曲线自然从高位起步，算出来的
+    convergence_s 恒为 0.0。
+
+    E1 的「收敛 < 1s」曾经就是这样被记为通过的——四档音量全报 0.0，而那只是
+    "开录时早就收敛完了"，从没测过收敛要多久。所以这里在 settle>0 时把它记为
+    不可测，而不是留一个读起来像满分的 0.0。
+    """
     import numpy as np
     with wave.open(str(stereo), "rb") as w:
         rate, n = w.getframerate(), w.getnframes()
@@ -164,7 +174,13 @@ def analyse(stereo: Path, settle_s=1.0):
             if not np.isnan(v) and v >= steady - 3:
                 if all((not np.isnan(u)) and u >= steady - 6 for u in curve[i:i + 5]):
                     conv = round(i * 0.1, 1); break
-    res["convergence_s"] = conv
+    if capture_settle_s > 0:
+        res["convergence_s"] = None
+        res["convergence_note"] = (
+            f"不可测：固件先播了 {capture_settle_s}s 才开始录音，"
+            f"滤波器在开录前已收敛。要测收敛请用 --settle 0。")
+    else:
+        res["convergence_s"] = conv
 
     # 分频段（低/中/高），用 FFT 功率比
     spec_pre = np.abs(np.fft.rfft(pre[skip:])) ** 2
@@ -243,7 +259,8 @@ def main():
     dur, nm, nc = pack_stereo(dest / "mic_raw.wav", dest / "clean_aec.wav",
                               dest / "stereo_pre_post.wav")
     print(f"  stereo packed: {dur:.2f}s (mic={nm} clean={nc} samples)")
-    res = analyse(dest / "stereo_pre_post.wav", settle_s=1.0)
+    res = analyse(dest / "stereo_pre_post.wav", settle_s=1.0,
+                  capture_settle_s=args.settle)
     res["_meta"] = {"run_id": run_id, "capture_args": cap_args, "device_msg": msg[:300]}
     (dest / "analysis.json").write_text(json.dumps(res, ensure_ascii=False, indent=2))
     print("  " + json.dumps({k: v for k, v in res.items()
