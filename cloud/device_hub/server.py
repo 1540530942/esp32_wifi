@@ -1076,8 +1076,18 @@ async def upload_audio(
     if len(content) > UPLOAD_MAX_BYTES:
         return _err(413, "too_large", f"文件超过 {UPLOAD_MAX_BYTES // 1024 // 1024}MB 限制")
 
-    suffix = Path(file.filename or "audio.wav").suffix.lower() or ".wav"
-    filename = secrets.token_hex(8) + suffix
+    # Keep the device's own name as a prefix instead of discarding it.
+    #
+    # The echo demo uploads two files per turn -- the AFE output and the raw
+    # microphone -- and which is which is the whole point of the comparison.
+    # With both stored under random hex, telling them apart meant inferring
+    # from the fact that one had been peak-normalised, which is a property that
+    # could change. The stem is sanitised rather than trusted: it comes from the
+    # device and lands on the filesystem.
+    src = Path(file.filename or "audio.wav")
+    suffix = src.suffix.lower() or ".wav"
+    stem = re.sub(r"[^A-Za-z0-9_-]", "", src.stem)[:40]
+    filename = (f"{stem}-" if stem else "") + secrets.token_hex(6) + suffix
     (AUDIO_DIR / filename).write_bytes(content)
 
     audio_url = f"{AUDIO_PUBLIC_BASE}/{filename}"
