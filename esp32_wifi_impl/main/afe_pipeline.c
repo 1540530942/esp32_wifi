@@ -23,7 +23,7 @@
 
 static const char *TAG = "afe";
 
-static char s_cfg_summary[160] = "(afe not initialised)";
+static char s_cfg_summary[320] = "(afe not initialised)";
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t  *s_afe_data;
 static afe_audio_cb_t      s_audio_cb;
@@ -658,11 +658,27 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
     cfg->ns_init = (AEC_NS_ENABLE != 0);
     afe_config_check(cfg);
     // Snapshot post-check, so what is reported is what the AFE really runs with.
+    // The barge-in constants go in here too, not just the AFE's own fields.
+    // A miss reported both=1 with SPEECH_FRAMES believed to be 1, which should
+    // have fired -- and the two candidate explanations (the build used a
+    // different value, or the duck latch was still set) cannot be told apart
+    // by reading source, because the local sdkconfig says 4 while the Kconfig
+    // default CI builds from says 1, and the device is built by CI. Guessing
+    // which one is running is exactly the mistake this project keeps making
+    // with values that only ever reached the UART.
     snprintf(s_cfg_summary, sizeof(s_cfg_summary),
-             "fmt=%s type=VC aec=%d nlp=%d filt=%d ns=%d vad=%d rate=%d",
+             "fmt=%s type=VC aec=%d nlp=%d filt=%d ns=%d vad=%d rate=%d "
+             "vad_mode=%d vad_min_speech=%d vad_delay=%d "
+             "grace=%d min_rms=%d speech_frames=%d silence_frames=%d",
              fmt, (int)cfg->aec_init, (int)cfg->aec_nlp_level,
              (int)cfg->aec_filter_length, (int)cfg->ns_init,
-             (int)cfg->vad_init, (int)cfg->pcm_config.sample_rate);
+             (int)cfg->vad_init, (int)cfg->pcm_config.sample_rate,
+             (int)cfg->vad_mode, (int)cfg->vad_min_speech_ms,
+             (int)cfg->vad_delay_ms,
+             (int)CONFIG_AEC_BARGEIN_ONSET_GRACE_MS,
+             (int)CONFIG_AEC_BARGEIN_MIN_RMS,
+             (int)CONFIG_AEC_BARGEIN_SPEECH_FRAMES,
+             (int)CONFIG_AEC_BARGEIN_SILENCE_FRAMES);
     // Dump what the AFE actually ended up with -- afe_config_check() silently
     // rewrites conflicting fields, and the AEC mode / filter length it picks
     // decides how much echo we can cancel.
