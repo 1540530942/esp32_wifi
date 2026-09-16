@@ -243,10 +243,17 @@ config AEC_BARGEIN_EARLY_FRAMES
 
 config AEC_BARGEIN_SILENCE_FRAMES
     int "Sustained AFE silence frames before un-ducking a false trigger"
-    default 20
+    default 10
     help
       T3.1 asks for roughly 320 ms of continuous silence to end an
-      interruption; at the AFE's ~16 ms frame that is 20 frames.
+      interruption. The AFE's FETCH chunk -- which is what this counts -- is
+      512 samples, i.e. 32 ms at 16 kHz, so 320 ms is 10 frames.
+
+      This was 20 for a long while, on the assumption that a frame was 16 ms.
+      It is not; the device reports fetch_chunk=512 and frame_ms=32.0. That
+      made the real window 640 ms, twice what T3.1 specifies, while the
+      criterion was being recorded as passed. Do not re-derive this from the
+      feed chunk (256) -- feed and fetch differ.
 
       This must not be 1. Natural speech has inter-syllable gaps far longer
       than one frame, so un-ducking on the first non-speech frame makes the

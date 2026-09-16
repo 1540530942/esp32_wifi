@@ -576,10 +576,14 @@ static void fetch_task(void *arg)
                 silence_run = 0;
             } else if (ducked && res->vad_state != VAD_SPEECH) {
                 // T3.1: end the interruption only after sustained silence.
-                // Un-ducking on the first non-speech frame (~16 ms) made the
+                // Un-ducking on the first non-speech frame (32 ms) made the
                 // robot bounce back to full volume inside the gaps between the
                 // user's own syllables, then duck again -- audible flapping,
                 // and the opposite of "the user is still talking".
+                //
+                // One frame here is the AFE's FETCH chunk, 512 samples = 32 ms,
+                // not the 256-sample feed chunk. Getting that wrong is what
+                // made 20 frames read as 320 ms when it was really 640.
                 if (++silence_run >= CONFIG_AEC_BARGEIN_SILENCE_FRAMES) {
                     ESP_LOGI(TAG, "barge-in ended: %d silent frames -> unduck", silence_run);
                     playback_unduck();   // false alarm (cough/door) -> restore volume
