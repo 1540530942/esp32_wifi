@@ -1504,23 +1504,48 @@ extern "C" void app_main() {
     // --- boot self-check on the reference channel ---------------------------
     // The task list suggests playing a short signal at startup and warning if
     // the ch1 peak is out of range. No extra signal is needed: the boot
-    // announcement is already audio through the same speaker, so it doubles as
-    // the stimulus.
+    // announcement is already audio through the same speaker.
     //
-    // Why this is worth having: the failure it catches is silent. A reference
-    // that is too hot clips, which breaks the linearity the AEC depends on; one
-    // that is too quiet gives the filter nothing to work with. Either way the
-    // room sounds normal and the only symptom is that barge-in stops working
-    // once somebody is actually talking to it -- discovered, if ever, in use.
+    // It has to be measured WHILE that audio plays, though. boot_announce()
+    // only POSTs a request -- the hub synthesises the speech and sends a
+    // play_audio back -- so reading the level straight after it returns samples
+    // silence and reports a healthy board as TOO QUIET, which is exactly what
+    // the first version of this did (peak=-84.3, i.e. absolute silence).
     //
-    // Band measured on this hardware with real speech (see the volume sweep in
-    // docs/logs): peak is -9.0 dBFS at volume 80 and -6.4 at 85, both inside
-    // T1.3's -12..-6; it reaches -3.9 at 90 and -1.9 at 100, where the clipping
-    // counter starts moving. The check is deliberately wider than T1.3 -- it is
-    // looking for a broken setup, not for calibration drift.
-    afe_ref_level(nullptr, nullptr);          // clear the running peak
+    // So it runs in its own task: wait for the player to actually start, clear
+    // the peak then, and grade it once the utterance ends. Running it inline
+    // would hold up the heartbeat loop for as long as the cloud takes.
+    //
+    // "The announcement never played" is reported as its own outcome rather
+    // than as a quiet reference. Otherwise an unreachable hub or a TTS failure
+    // would be misreported as a hardware fault on ch1.
+    //
+    // Why bother: this failure is silent. A reference that is too hot clips and
+    // breaks the linearity the AEC depends on; too quiet and the filter has
+    // nothing to work with. The room sounds fine either way, and the only
+    // symptom is that barge-in stops working once somebody actually talks to
+    // it. Band measured on this hardware with real speech: -9.0 dBFS at volume
+    // 80, -6.4 at 85, -3.9 at 90, -1.9 at 100 where clipping starts. The check
+    // is deliberately wider than T1.3's -12..-6 -- it looks for a broken setup,
+    // not for calibration drift.
     hub.boot_announce();
-    {
+    xTaskCreate([](void*) {
+        AudioPlayer* pl = s_audio_player;
+        const int64_t t0 = esp_timer_get_time();
+        bool started = false;
+        while ((esp_timer_get_time() - t0) < 90LL * 1000000) {
+            if (pl && pl->is_playing()) { started = true; break; }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!started) {
+            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "no announcement played");
+            ESP_LOGW(TAG, "reference self-check skipped: the announcement never "
+                          "played, so nothing can be said about ch1");
+            vTaskDelete(nullptr);
+            return;
+        }
+        afe_ref_level(nullptr, nullptr);          // start the window at playback
+        while (pl && pl->is_playing()) vTaskDelay(pdMS_TO_TICKS(50));
         float peak = -120.0f;
         uint32_t clipped = 0;
         if (afe_ref_level(&peak, &clipped)) {
@@ -1537,11 +1562,13 @@ extern "C" void app_main() {
                 ESP_LOGI(TAG, "reference self-check: %s", s_ref_selftest);
             }
         } else {
-            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "no playback observed");
-            ESP_LOGW(TAG, "reference self-check: the announcement produced no "
-                          "reference signal at all");
+            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "ch1 silent during playback");
+            ESP_LOGW(TAG, "reference self-check: audio played but ch1 saw nothing "
+                          "-- loopback path is broken");
         }
-    }
+        vTaskDelete(nullptr);
+    }, "ref_selftest", 3072, nullptr, 3, nullptr);
+
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
             hub.heartbeat();
