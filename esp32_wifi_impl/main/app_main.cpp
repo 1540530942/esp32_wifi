@@ -869,6 +869,24 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         snprintf(fname, sizeof(fname), "echo_%lld.wav",
                  (long long)(esp_timer_get_time() / 1000));
         const bool up = aec_upload_wav(fname, bclean, nc, false);
+
+        // Beta also uploads the RAW microphone for the same window, because the
+        // pair is the proof. The recording was made while the robot was
+        // speaking, so transcribing both should read the robot from the
+        // microphone and the person from the AFE output -- the same paired
+        // evidence that settled E3, but over a whole natural turn instead of a
+        // staged four-second overlap. Without the mic channel a clean replay
+        // could just mean the robot happened to be quiet.
+        // Note the two are not sample-aligned: the clean buffer carries the
+        // pre-roll ahead of the barge-in while the microphone buffer starts at
+        // it. That is fine for the question being asked, which is about content
+        // rather than timing.
+        if (keep_talking && nm > 0) {
+            char mname[72];
+            snprintf(mname, sizeof(mname), "echomic_%lld.wav",
+                     (long long)(esp_timer_get_time() / 1000));
+            aec_upload_wav(mname, bmic, nm, false);
+        }
         heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
 
         char out[224];
