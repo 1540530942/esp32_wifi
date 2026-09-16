@@ -33,13 +33,16 @@ PI_CLIP_DIR = "/home/pi/action_move/local_audio"
 def pi_play(name, timeout=40):
     """Play the interruption on the Pi over ssh, and block until it finishes.
 
-    NOT the /action/api/tasks queue. That queue takes about 8 seconds from cue
-    to sound, which is longer than the window this measurement watches -- so
-    the earlier 50-60% figure was collected with the interrupter frequently
-    speaking outside the observation window, or barely inside it. A trigger
-    rate measured that way says more about task latency than about the
-    detector. aplay over ssh starts inside a second and blocks for exactly the
-    clip, so the window is known.
+    Uses ssh rather than /action/api/tasks, but NOT because that queue is slow:
+    measured end to end it is 1.4s from POST to sound, with the Pi claiming the
+    task in 7ms. An earlier version of this comment blamed an "8 second" queue
+    lag for contaminated measurements, and that was wrong -- the figure came
+    from misreading one timeline, and switching transport actually made the
+    trigger rate look WORSE (50-60% -> 42%), which should have settled it at
+    the time. The scoring was the whole problem.
+
+    ssh is still preferable here: it blocks for exactly the clip, so the
+    observation window is known rather than inferred.
     """
     subprocess.run(["ssh", "pi", f"aplay -D plughw:2,0 {PI_CLIP_DIR}/{name}"],
                    capture_output=True, timeout=timeout)

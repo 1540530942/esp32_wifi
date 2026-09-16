@@ -30,12 +30,16 @@ PI_CLIP_DIR = "/home/pi/action_move/local_audio"
 def pi_play(name, timeout=40):
     """Play the interruption on the Pi over ssh, blocking until it finishes.
 
-    Not /action/api/tasks: that queue takes about 8 seconds from cue to sound.
-    E4 arms the click detector and then expects the interruption inside the
-    clip that is playing, so an 8 second lag put the sound outside the window
-    in some runs and at its very edge in others -- which is why runs were being
-    discarded as "clip ended before the interruption" and why the latency
-    distribution looked bimodal. aplay starts inside a second.
+    Uses ssh rather than /action/api/tasks, but NOT because that queue is slow:
+    measured end to end it is 1.4s from POST to sound, with the Pi claiming the
+    task in 7ms. An earlier version of this comment blamed an "8 second" queue
+    lag for contaminated measurements, and that was wrong -- the figure came
+    from misreading one timeline, and switching transport actually made the
+    trigger rate look WORSE (50-60% -> 42%), which should have settled it at
+    the time. The scoring was the whole problem.
+
+    ssh is still preferable here: it blocks for exactly the clip, so the
+    observation window is known rather than inferred.
     """
     subprocess.run(["ssh", "pi", f"aplay -D plughw:2,0 {PI_CLIP_DIR}/{name}"],
                    capture_output=True, timeout=timeout)

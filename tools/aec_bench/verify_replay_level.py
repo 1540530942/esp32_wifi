@@ -9,10 +9,12 @@ no sound at all.
 
 Two things this gets right that the first version did not:
 
-* The interruption is played over ssh with aplay, not queued on the task API.
-  The task queue took about 8 seconds from cue to sound, by which point the
-  robot's turn had already ended -- so that run measured something which was
-  never an interruption at all. aplay starts inside a second.
+* The interruption is played over ssh with aplay, which blocks for exactly the
+  clip so the window is known. (An earlier version of this file claimed the
+  task queue took 8 seconds from cue to sound; measured properly it is 1.4s.
+  The first run of this check did fail because the interruption landed after
+  the robot had already been stopped by something else, but the cause was room
+  noise stopping the robot early, not the transport.)
 * The verdict compares what happens after the interruption against the robot's
   own turn in the SAME recording, which cancels speaker volume, distance and
   microphone gain.
