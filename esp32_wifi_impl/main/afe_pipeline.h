@@ -49,6 +49,13 @@ void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
 // Returns false if no playback has been observed yet.
 bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 
+// --- independent reference peak ---------------------------------------------
+// Same measurement as afe_ref_level()'s peak but on its own latch, because that
+// one is destructive-read and the heartbeat already consumes it every 5s. Any
+// second consumer reading it sees only what accumulated since the last
+// heartbeat. Reset by this accessor alone.
+bool afe_ref_peak_hold(float *peak_dbfs);
+
 // --- E3 double-talk aid -----------------------------------------------------
 // Suppresses the barge-in ACTION while leaving detection and the gate counters
 // running. E3 has to observe the robot and a person speaking at the same time

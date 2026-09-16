@@ -1544,11 +1544,13 @@ extern "C" void app_main() {
             vTaskDelete(nullptr);
             return;
         }
-        afe_ref_level(nullptr, nullptr);          // start the window at playback
+        afe_ref_peak_hold(nullptr);               // start the window at playback
         while (pl && pl->is_playing()) vTaskDelay(pdMS_TO_TICKS(50));
         float peak = -120.0f;
-        uint32_t clipped = 0;
-        if (afe_ref_level(&peak, &clipped)) {
+        // Its own latch, not afe_ref_level's: that one is reset by every
+        // heartbeat, so reading it across a multi-second utterance returns
+        // whatever arrived after the last heartbeat rather than the peak.
+        if (afe_ref_peak_hold(&peak)) {
             const char* verdict = peak > -3.0f  ? "TOO HOT (clipping risk)"
                                 : peak > -6.0f  ? "hot"
                                 : peak < -20.0f ? "TOO QUIET"

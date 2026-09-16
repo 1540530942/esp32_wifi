@@ -52,6 +52,16 @@ static StreamBufferHandle_t s_ref_ring;   // mono int16 reference samples
 // under test would be partly subtracted from the measurement.
 // Reference-channel peak tracking, reported through the heartbeat.
 static volatile int16_t  s_ref_peak = 0;
+// A SECOND peak, held independently of the one above.
+//
+// afe_ref_level() resets its peak on read so each heartbeat reports its own
+// window. That is right for the heartbeat and wrong for anything else, because
+// a destructive read cannot have two consumers: the boot self-check cleared the
+// peak at the start of the announcement and read it at the end, and in between
+// the heartbeat consumed it twice, so the check saw a single LSB and reported a
+// healthy board as TOO QUIET (-90.3 dBFS). This one is only ever reset by its
+// own accessor.
+static volatile int16_t  s_ref_peak_hold = 0;
 static volatile uint32_t s_ref_clip_frames = 0;
 
 static volatile bool    s_click_armed = false;
@@ -113,6 +123,15 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames)
     if (peak <= 0) { if (peak_dbfs) *peak_dbfs = -120.0f; return false; }
     if (peak_dbfs) *peak_dbfs = 20.0f * log10f((float)peak / 32767.0f);
     s_ref_peak = 0;   // window resets on read, so each heartbeat reports its own
+    return true;
+}
+
+bool afe_ref_peak_hold(float *peak_dbfs)
+{
+    const int16_t peak = s_ref_peak_hold;
+    s_ref_peak_hold = 0;
+    if (peak <= 0) { if (peak_dbfs) *peak_dbfs = -120.0f; return false; }
+    if (peak_dbfs) *peak_dbfs = 20.0f * log10f((float)peak / 32767.0f);
     return true;
 }
 
@@ -410,6 +429,7 @@ static void feed_task(void *arg)
                 if (a > ref_peak) ref_peak = a;
             }
             if (ref_peak > s_ref_peak) s_ref_peak = ref_peak;
+            if (ref_peak > s_ref_peak_hold) s_ref_peak_hold = ref_peak;
             // -3 dBFS of full scale for int16.
             if (ref_peak > 23197) {
                 s_ref_clip_frames++;
