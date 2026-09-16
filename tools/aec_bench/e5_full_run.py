@@ -107,6 +107,14 @@ def play_one(name, expected_ms):
     if not started:
         return None, "never started (command not delivered)"
 
+    # Arm the click detector purely to reset the gate counters, so a cut can be
+    # attributed instead of guessed at. e5_diagnose.py does this and saw zero
+    # cuts in 20 clips while this script cut one per run twice; arming is the
+    # one systematic difference left between them, so it is now present in both
+    # -- either the cuts persist and the counters explain them, or they vanish
+    # and arming itself is the variable. Both outcomes are informative.
+    post(f"{HUB}/command", {"action": "click_arm"})
+
     deadline = time.time() + expected_ms / 1000 + 45
     last = 0
     while time.time() < deadline:
@@ -178,6 +186,22 @@ def main() -> int:
             cut += 1
             print(f"  {name}: 实播 {played}ms / 应为 {expected}ms  "
                   f"**短 {short}ms —— 被切断**")
+            rid = post(f"{HUB}/command", {"action": "click_result"}).get("command_id", "")
+            msg = ""
+            end = time.time() + 25
+            while time.time() < end and not msg:
+                time.sleep(2)
+                proc = subprocess.run(["curl", "-s", "-m", "20", HUB],
+                                      capture_output=True, text=True)
+                try:
+                    for c in json.loads(proc.stdout).get("device", {}).get("commands") or []:
+                        if c.get("id") == rid and c.get("status") in ("done", "failed", "unsupported"):
+                            msg = c.get("message") or ""
+                except Exception:
+                    pass
+            keep = " ".join(w for w in msg.split() if w.split("=")[0] in
+                            ("frames", "loud", "speech", "both", "max_rms"))
+            print(f"      门限归因: {keep or '(读不到)'}")
         else:
             print(f"  {name}: 实播 {played}ms / 应为 {expected}ms  完整")
 
