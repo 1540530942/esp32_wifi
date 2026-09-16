@@ -662,6 +662,7 @@ struct EchoLoopCfg {
     AudioPlayer* player;
     std::string url;
     int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol, preroll_ms;
+    bool keep_talking;
 };
 
 // Repeats the cycle until told to stop: every time the room falls quiet for the
@@ -670,7 +671,8 @@ struct EchoLoopCfg {
 // tries again rather than giving up.
 static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
                                    int quiet_ms, int end_sil_ms, int max_rec_s,
-                                   int wait_s, int vol, int preroll_ms) {
+                                   int wait_s, int vol, int preroll_ms,
+                                   bool keep_talking) {
         // --- 1. wait for the room to be quiet -------------------------------
         const int64_t t_wait0 = esp_timer_get_time();
         while (afe_silence_ms() < quiet_ms) {
@@ -707,12 +709,36 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
             heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
             return "failed|stage=speak_start";
         }
-        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
-        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
-        // looks like from here. Anything else means the clip simply ended.
-        const bool interrupted = player->last_result() != ESP_OK;
+        bool interrupted;
+        if (!keep_talking) {
+            // Alpha: the barge-in stops playback, so waiting for the player to
+            // finish is waiting for the interruption.
+            while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
+            // stop_requested_ surfaces as INVALID_STATE; that is what a
+            // barge-in looks like from here. Anything else means the clip
+            // simply ended.
+            interrupted = player->last_result() != ESP_OK;
+        } else {
+            // Beta: the robot must NOT stop when somebody speaks -- the whole
+            // point is to record them while it is still talking, so every
+            // sample of the recording is taken during double-talk. The
+            // detector stays live (it drives the silence timer this loop needs)
+            // but its action is suppressed.
+            //
+            // Wait past the onset grace first: before the AEC has converged on
+            // this utterance the robot's own voice leaks, and treating that as
+            // "somebody spoke" would start recording against nobody.
+            afe_bargein_mute(true);
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_AEC_BARGEIN_ONSET_GRACE_MS + 300));
+            interrupted = false;
+            while (player->is_playing()) {
+                if (afe_silence_ms() < 200) { interrupted = true; break; }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        }
         const int spoke_ms = player->spk_played_ms();
         if (!interrupted) {
+            if (keep_talking) { player->stop(); afe_bargein_mute(false); }
             heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
             return "done|spoke=" + std::to_string(spoke_ms) +
                    "ms not_interrupted";
@@ -755,6 +781,15 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         }
         size_t nm = 0, nr = 0, nc = 0;
         afe_capture_end(&nm, &nr, &nc);
+        if (keep_talking) {
+            // Only now does the robot stop -- after the person has finished,
+            // which is what beta is testing. Note spoke_ms above is "how far
+            // in the robot was when the person started", not the total: it
+            // kept playing for the whole recording.
+            player->stop();
+            while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
+            afe_bargein_mute(false);
+        }
         const size_t captured = nc;      // what arrived AFTER the barge-in
         nc += pre;                       // the pre-roll is part of the recording
         const int rec_ms = (int)((esp_timer_get_time() - t_rec0) / 1000);
@@ -854,7 +889,8 @@ static void echo_loop_task(void* arg) {
         const std::string r = echo_demo_cycle(cfg->player, cfg->url, cfg->quiet_ms,
                                               cfg->end_sil_ms, cfg->max_rec_s,
                                               cfg->wait_s, cfg->vol,
-                                              cfg->preroll_ms);
+                                              cfg->preroll_ms,
+                                              cfg->keep_talking);
         if (s_echo_loop_stop) break;
         s_echo_cycles++;
         if (r.find("rec=") != std::string::npos) s_echo_replies++;
@@ -1199,6 +1235,15 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         // 56ms of bookkeeping after the stop. Anything extra is near-silence,
         // since the AEC has removed the robot from it.
         const int preroll_ms = num("preroll_ms", 600, 0, 1000);
+        // beta: keep talking through the interruption and record the person
+        // during double-talk, ending the turn only when they stop.
+        const bool keep_talking = [&]{
+            cJSON* b = cJSON_Parse(cmd.args_json.c_str());
+            cJSON* it = b ? cJSON_GetObjectItem(b, "keep_talking") : nullptr;
+            const bool v = cJSON_IsTrue(it);
+            if (b) cJSON_Delete(b);
+            return v;
+        }();
         cJSON* u = a ? cJSON_GetObjectItem(a, "url") : nullptr;
         std::string url = cJSON_IsString(u) ? u->valuestring :
             "http://192.168.1.16:8080/esp32/turn06_assistant.wav";
@@ -1214,12 +1259,14 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         }();
 
         if (!loop) return echo_demo_cycle(player, url, quiet_ms, end_sil_ms,
-                                          max_rec_s, wait_s, vol, preroll_ms);
+                                          max_rec_s, wait_s, vol, preroll_ms,
+                                          keep_talking);
 
         if (s_echo_loop_on) return "failed|stage=already_running";
         // Heap-allocated because the task outlives this handler's frame.
         auto* cfg = new EchoLoopCfg{player, url, quiet_ms, end_sil_ms,
-                                    max_rec_s, wait_s, vol, preroll_ms};
+                                    max_rec_s, wait_s, vol, preroll_ms,
+                                    keep_talking};
         s_echo_loop_stop = false;
         s_echo_cycles = 0;
         s_echo_replies = 0;

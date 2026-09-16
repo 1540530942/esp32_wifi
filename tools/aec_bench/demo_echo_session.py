@@ -54,7 +54,13 @@ def main():
     # through and the loop still "works", which is exactly the kind of pass
     # that means nothing.
     quiet_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
-    print(f"回声循环会话 · {secs}s，静音门槛 {quiet_ms}ms，树莓派全程录音\n")
+    # beta: the robot keeps talking through the interruption, so every sample
+    # of the recording is taken during double-talk. Alpha records after
+    # playback has stopped, where there is no echo left to cancel -- a clean
+    # replay there proves the plumbing works but says nothing about the AEC.
+    beta = "--beta" in sys.argv
+    print(f"回声循环会话 · {'beta（不停播，双讲中录音）' if beta else 'alpha（打断即停播）'}"
+          f" · {secs}s，静音门槛 {quiet_ms}ms，树莓派全程录音\n")
 
     before = {c.get("id") for c in (device().get("commands") or [])
               if c.get("action") == "play_audio"}
@@ -74,6 +80,7 @@ def main():
     r = post(f"{HUB}/command", {
         "action": "echo_demo",
         "args": {"loop": True, "quiet_ms": quiet_ms, "end_silence_ms": 800,
+                 "keep_talking": beta,
                  # wait_s is the per-cycle patience for the room to go quiet.
                  # With a 10s gate it must be well above 10s or a single cough
                  # ends the cycle as "never quiet".
