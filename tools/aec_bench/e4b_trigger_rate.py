@@ -87,9 +87,10 @@ def one_run(assistant, user, volume, pi_volume):
 
     outcome is "fired", "miss", or "invalid".
     """
-    post(f"{HUB}/play_lan_audio",
-         {"params": {"name": assistant},
-          "settings_override": {"voice_volume_percent": volume}})
+    play_id = post(f"{HUB}/play_lan_audio",
+                   {"params": {"name": assistant},
+                    "settings_override": {"voice_volume_percent": volume}}
+                   ).get("command_id", "")
 
     deadline = time.time() + 40
     while time.time() < deadline:
@@ -110,23 +111,42 @@ def one_run(assistant, user, volume, pi_volume):
 
     # Blocks for the duration of the clip, so when this returns the interrupter
     # has definitely spoken -- there is no "did it even play" ambiguity left.
-    pi_play(user)
+    if user:
+        pi_play(user)
+    else:
+        time.sleep(4.1)      # same window, no sound
 
     # A little past the clip, so a slow stop still counts as a stop.
     time.sleep(3)
 
-    # Judged on whether playback stopped, not on the click pairing.
+    # Judged on whether the PLAY COMMAND ended early, not on the click pairing
+    # and not on audio_playing.
     #
-    # The 20ms click exists so E4 can time the stop without the two machines
-    # sharing a clock, and for latency there is no substitute. But trigger rate
-    # only asks "did it stop", which the player answers directly -- so this
-    # test does not need the click, and the clip it plays no longer carries
-    # one. It is an unpleasant artefact to sit next to for an hour of runs, and
-    # it is not what a person interrupting actually sounds like.
+    # click_result only records a latency when the click was seen before the
+    # barge-in fired (it pairs s_click_us with s_click_duck_us). The barge-in
+    # fires on the first qualifying speech frame, while the click detector has
+    # to satisfy an envelope ratio first, so the barge-in can easily win the
+    # race -- and then the acknowledgement says "no barge-in yet" for a turn
+    # that was in fact cut off. Scoring those as misses is what produced the
+    # 42% figure; several of them had stopped the robot exactly as intended.
     #
-    # Latency is still read from click_result when a click happens to be
-    # present, so a run with the click fixture reports both.
-    stopped = not state().get("audio_playing")
+    # audio_playing is no better: it rides the heartbeat and can be 5s stale.
+    #
+    # The play command is the durable evidence. turn04 is 27.2s and the
+    # interruption lands about 7s in, so a command that has already reached a
+    # terminal state by now was ended by something -- and nothing else in this
+    # run sends a stop until after this check.
+    # Only a command that ended as "failed|stage=wav_playback" counts. A clip
+    # that simply ran out reports "done", and turn04 is 27.2s against roughly
+    # 18s of run, so a natural end would mean the run overran -- which must not
+    # be scored as a successful interruption.
+    stopped = False
+    for c in device().get("commands") or []:
+        if c.get("id") == play_id:
+            if c.get("status") == "failed" and "wav_playback" in str(c.get("message")):
+                stopped = True
+            elif c.get("status") == "done":
+                return "invalid", None, "整段播完了，插话没赶上（本轮超时）"
     ack = command_ack(post(f"{HUB}/command",
                            {"action": "click_result"}).get("command_id", "")) or ""
     stats = " ".join(w for w in ack.split()
@@ -146,6 +166,10 @@ def main():
     ap.add_argument("--user", default="turn05_user.wav")
     ap.add_argument("--volume", type=int, default=80)
     ap.add_argument("--pi-volume", type=int, default=80)
+    # Negative control: run the identical sequence but never play the
+    # interruption. A criterion that reports "fired" here is measuring
+    # something other than barge-in, and a 100% rate would mean nothing.
+    ap.add_argument("--silent-control", action="store_true")
     args = ap.parse_args()
 
     fired, missed, invalid, fired_n = [], 0, [], 0
@@ -153,7 +177,8 @@ def main():
           f"树莓派播 {args.user} @vol{args.pi_volume}\n")
     for i in range(args.runs):
         outcome, latency, detail = one_run(
-            args.assistant, args.user, args.volume, args.pi_volume)
+            args.assistant, "" if args.silent_control else args.user,
+            args.volume, args.pi_volume)
         if outcome == "fired":
             if latency is not None:
                 fired.append(latency)
