@@ -56,6 +56,17 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 // heartbeat. Reset by this accessor alone.
 bool afe_ref_peak_hold(float *peak_dbfs);
 
+// --- pre-roll ---------------------------------------------------------------
+// Copies up to `want` samples of the AFE's clean output from just BEFORE now
+// into dst, oldest first, and returns how many were available (up to 1s).
+//
+// Recording starts after the barge-in, so the speech that caused the barge-in
+// is already gone by then -- the replay was losing its first word or two. This
+// hands back that audio. It is real speech, not echo: E3 showed the AFE output
+// during double-talk transcribes as the person while the raw mic transcribes
+// as the robot.
+size_t afe_preroll_copy(int16_t *dst, size_t want);
+
 // --- last barge-in timestamp ------------------------------------------------
 // esp_timer microseconds of the most recent barge-in, set on every one rather than only
 // when E4 has armed a click. The echo demo subtracts it from the moment

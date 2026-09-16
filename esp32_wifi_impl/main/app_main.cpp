@@ -661,7 +661,7 @@ static bool aec_upload_wav(const char* name, const int16_t* pcm, size_t samples,
 struct EchoLoopCfg {
     AudioPlayer* player;
     std::string url;
-    int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol;
+    int quiet_ms, end_sil_ms, max_rec_s, wait_s, vol, preroll_ms;
 };
 
 // Repeats the cycle until told to stop: every time the room falls quiet for the
@@ -670,7 +670,7 @@ struct EchoLoopCfg {
 // tries again rather than giving up.
 static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
                                    int quiet_ms, int end_sil_ms, int max_rec_s,
-                                   int wait_s, int vol) {
+                                   int wait_s, int vol, int preroll_ms) {
         // --- 1. wait for the room to be quiet -------------------------------
         const int64_t t_wait0 = esp_timer_get_time();
         while (afe_silence_ms() < quiet_ms) {
@@ -728,7 +728,14 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         // tearing down (T3.2 measures 21-32ms), the 20ms poll above noticing,
         // and the capture starting. Timing only the last of those would report
         // a number near zero while the replay still lost its first syllable.
-        afe_capture_begin(bmic, bref, bclean, cap);
+        // Prepend what the AFE heard just BEFORE the barge-in. Recording can
+        // only begin once the detector has fired, and the speech that made it
+        // fire is already past by then -- the replay was arriving without its
+        // first word. The pre-roll hands that audio back.
+        const size_t pre_want = (size_t)preroll_ms * 16 /* samples per ms */;
+        const size_t pre = afe_preroll_copy(bclean,
+                                            pre_want < cap ? pre_want : cap);
+        afe_capture_begin(bmic, bref, bclean + pre, cap - pre);
         const int64_t t_rec0 = esp_timer_get_time();
         const int64_t t_fired = afe_last_bargein_us();
         const int gap_ms = t_fired ? (int)((t_rec0 - t_fired) / 1000) : -1;
@@ -748,12 +755,18 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         }
         size_t nm = 0, nr = 0, nc = 0;
         afe_capture_end(&nm, &nr, &nc);
+        const size_t captured = nc;      // what arrived AFTER the barge-in
+        nc += pre;                       // the pre-roll is part of the recording
         const int rec_ms = (int)((esp_timer_get_time() - t_rec0) / 1000);
 
-        if (!heard || nc < 16000 / 4) {
+        // Test what was captured, not the total. With 600ms of pre-roll folded
+        // in, nc is always above a 0.25s floor and this guard would stop
+        // catching an empty recording -- the exact failure it exists for.
+        if (!heard || captured < 16000 / 4) {
             heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
             return "done|interrupted spoke=" + std::to_string(spoke_ms) +
-                   "ms but recorded nothing (clean=" + std::to_string((int)nc) + ")";
+                   "ms but recorded nothing (captured=" +
+                   std::to_string((int)captured) + ")";
         }
 
         // --- 3b. bring it up to a listenable level ---------------------------
@@ -826,10 +839,11 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         char out[224];
         snprintf(out, sizeof(out),
                  "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
-                 "samples=%u peak=%d gain=%.1fx gap=%dms replayed=1 upload=%d file=%s",
+                 "samples=%u pre=%ums peak=%d gain=%.1fx gap=%dms replayed=1 "
+                 "upload=%d file=%s",
                  (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
-                 (unsigned)nc, (int)peak, gain_q8 / 256.0, gap_ms, up ? 1 : 0,
-                 fname);
+                 (unsigned)nc, (unsigned)(pre / 16), (int)peak, gain_q8 / 256.0,
+                 gap_ms, up ? 1 : 0, fname);
         return std::string(out);
 
 }
@@ -839,7 +853,8 @@ static void echo_loop_task(void* arg) {
     while (!s_echo_loop_stop) {
         const std::string r = echo_demo_cycle(cfg->player, cfg->url, cfg->quiet_ms,
                                               cfg->end_sil_ms, cfg->max_rec_s,
-                                              cfg->wait_s, cfg->vol);
+                                              cfg->wait_s, cfg->vol,
+                                              cfg->preroll_ms);
         if (s_echo_loop_stop) break;
         s_echo_cycles++;
         if (r.find("rec=") != std::string::npos) s_echo_replies++;
@@ -1180,6 +1195,10 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         const int max_rec_s  = num("max_record_s", 15, 2, 25);
         const int wait_s     = num("wait_s", 60, 5, 180);
         const int vol        = num("volume", 80, 0, 100);
+        // 600ms covers a gradual speech onset crossing the level gate plus the
+        // 56ms of bookkeeping after the stop. Anything extra is near-silence,
+        // since the AEC has removed the robot from it.
+        const int preroll_ms = num("preroll_ms", 600, 0, 1000);
         cJSON* u = a ? cJSON_GetObjectItem(a, "url") : nullptr;
         std::string url = cJSON_IsString(u) ? u->valuestring :
             "http://192.168.1.16:8080/esp32/turn06_assistant.wav";
@@ -1195,12 +1214,12 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         }();
 
         if (!loop) return echo_demo_cycle(player, url, quiet_ms, end_sil_ms,
-                                          max_rec_s, wait_s, vol);
+                                          max_rec_s, wait_s, vol, preroll_ms);
 
         if (s_echo_loop_on) return "failed|stage=already_running";
         // Heap-allocated because the task outlives this handler's frame.
         auto* cfg = new EchoLoopCfg{player, url, quiet_ms, end_sil_ms,
-                                    max_rec_s, wait_s, vol};
+                                    max_rec_s, wait_s, vol, preroll_ms};
         s_echo_loop_stop = false;
         s_echo_cycles = 0;
         s_echo_replies = 0;

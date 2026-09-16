@@ -39,6 +39,25 @@ static volatile uint32_t s_n_in = 0, s_n_out = 0;
 
 // Raw / clean capture (see afe_capture_begin).
 static int16_t *s_cap_mic, *s_cap_ref, *s_cap_clean;
+
+// --- pre-roll ---------------------------------------------------------------
+// A rolling window of the AFE's clean output, always running.
+//
+// Recording can only start after the barge-in fires, and the speech that
+// triggered the barge-in is by definition already past. That loss is not the
+// 56ms of bookkeeping after the stop -- it is however long the person had to
+// talk before crossing the gate, which grows with the threshold (raised from
+// 40 to 150 to fix E5's false triggers) and is longer for a gradual speech
+// onset than for E4's sharp click.
+//
+// The audio exists: E3 established that during double-talk the AFE's output
+// carries the person, not the robot -- ASR reads the person from it while the
+// raw microphone reads the robot. So keeping the last second of it costs 32KB
+// and lets the replay begin where the person did.
+#define PREROLL_SAMPLES 16000          /* 1.0 s at 16 kHz */
+static int16_t s_preroll[PREROLL_SAMPLES];
+static volatile size_t s_preroll_w;    /* next write index, wraps */
+static volatile bool s_preroll_full;
 static volatile size_t s_cap_cap, s_cap_i_in, s_cap_i_out;
 static volatile bool s_cap_on = false;
 
@@ -507,6 +526,16 @@ static void fetch_task(void *arg)
             static uint32_t s_fetched = 0;
             static int64_t s_fetch_log_us = 0;
             s_fetched++;
+            if (res->data && res->data_size > 0) {
+                const int n = res->data_size / 2;
+                for (int i = 0; i < n; i++) {
+                    s_preroll[s_preroll_w] = res->data[i];
+                    if (++s_preroll_w >= PREROLL_SAMPLES) {
+                        s_preroll_w = 0;
+                        s_preroll_full = true;
+                    }
+                }
+            }
             if (s_cap_on && res->data && res->data_size > 0 && s_cap_i_out < s_cap_cap) {
                 int n = res->data_size / 2;
                 for (int i = 0; i < n && s_cap_i_out < s_cap_cap; i++)
@@ -797,6 +826,20 @@ void afe_metrics_end(float *mic_rms, float *ref_rms, float *clean_rms)
     if (mic_rms)   *mic_rms   = ni ? (float)sqrt(s_acc_mic / ni) : 0.0f;
     if (ref_rms)   *ref_rms   = ni ? (float)sqrt(s_acc_ref / ni) : 0.0f;
     if (clean_rms) *clean_rms = no ? (float)sqrt(s_acc_clean / no) : 0.0f;
+}
+
+size_t afe_preroll_copy(int16_t *dst, size_t want)
+{
+    const size_t have = s_preroll_full ? PREROLL_SAMPLES : s_preroll_w;
+    if (want > have) want = have;
+    if (!dst || want == 0) return 0;
+    // Oldest-first: walk back `want` samples from the write cursor, wrapping.
+    size_t start = (s_preroll_w + PREROLL_SAMPLES - want) % PREROLL_SAMPLES;
+    for (size_t i = 0; i < want; i++) {
+        dst[i] = s_preroll[start];
+        if (++start >= PREROLL_SAMPLES) start = 0;
+    }
+    return want;
 }
 
 void afe_capture_begin(int16_t *mic, int16_t *ref, int16_t *clean, size_t cap_samples)
