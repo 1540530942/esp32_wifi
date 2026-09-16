@@ -131,12 +131,14 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     play_id = play.get("command_id", "")
     if not play.get("ok"):
         result["reason"] = "play command rejected"
+        result["setup_failed"] = True
         return result
 
     # The robot must actually be speaking, or there is nothing to interrupt and
     # the run says nothing about latency.
     if not wait_until_playing():
         result["reason"] = "robot never started playing (command not delivered)"
+        result["setup_failed"] = True
         return result
 
     # Past the onset grace and far enough in that the AEC has converged.
@@ -146,6 +148,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     arm_id = arm.get("command_id", "")
     if not command_ack(arm_id, timeout_s=20):
         result["reason"] = "click_arm never acknowledged"
+        result["setup_failed"] = True
         return result
 
     # Waiting for that acknowledgement can take tens of seconds, and the clip
@@ -155,6 +158,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     # immediately before the interruption, or the run proves nothing.
     if not device_state().get("audio_playing"):
         result["reason"] = "clip ended before the interruption (arm ack was slow)"
+        result["setup_failed"] = True
         return result
 
     pi_play(user)
@@ -164,6 +168,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     ack = command_ack(res.get("command_id", ""))
     if not ack:
         result["reason"] = "click_result never acknowledged"
+        result["setup_failed"] = True
         return result
 
     match = re.search(r"latency=(\d+) ms", ack)
@@ -206,12 +211,15 @@ def main() -> None:
     ap.add_argument("--pi-volume", type=int, default=100)
     args = ap.parse_args()
 
-    good, bad, untimed = [], [], 0
+    good, bad, untimed, invalid = [], [], 0, 0
     for i in range(1, args.runs + 1):
         out = one_run(args.assistant, args.user, args.volume, args.pi_volume)
         if out["ok"]:
             good.append(out["latency_ms"])
             print(f"run {i}: latency = {out['latency_ms']} ms")
+        elif out.get("setup_failed"):
+            invalid += 1
+            print(f"run {i}: 作废（布置失败） — {out['reason']}")
         elif out.get("fired_untimed"):
             untimed += 1
             print(f"run {i}: 触发（未计时） — {out['reason']}")
@@ -232,8 +240,12 @@ def main() -> None:
 
     print()
     fired = len(good) + untimed
-    print(f"打断触发 {fired}/{args.runs}（其中 {len(good)} 次配上了咔哒可计时，"
-          f"{untimed} 次打断跑赢咔哒、无法计时）")
+    # A run that never got set up is not a miss. Conflating the two is how a
+    # broken rig reads as a broken detector -- the same confusion that turned a
+    # 100% trigger rate into a reported 42% earlier today.
+    print(f"打断触发 {fired}/{fired + len(bad)} 次有效尝试"
+          f"（其中 {len(good)} 次可计时，{untimed} 次打断跑赢咔哒）"
+          f"{f'；另有 {invalid} 次作废（布置失败，不计入）' if invalid else ''}")
     if bad:
         print(f"真·漏触发 {len(bad)} 次：")
         for reason in bad:

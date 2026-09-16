@@ -682,23 +682,17 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         }
         const int64_t t_speak = esp_timer_get_time();
 
-        // --- 2. speak, until finished or interrupted ------------------------
-        if (player->play_wav_url(url.c_str(), (uint8_t)vol) != ESP_OK) {
-            return "failed|stage=speak_start";
-        }
-        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
-        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
-        // looks like from here. Anything else means the clip simply ended.
-        const bool interrupted = player->last_result() != ESP_OK;
-        const int spoke_ms = player->spk_played_ms();
-        if (!interrupted) {
-            return "done|spoke=" + std::to_string(spoke_ms) +
-                   "ms not_interrupted";
-        }
-
-        // --- 3. record the interrupter --------------------------------------
-        // The AFE's clean output, so what gets played back is the speaker with
-        // the robot's own voice already removed -- the demo is the AEC.
+        // --- 1b. allocate the recording buffers BEFORE speaking --------------
+        // These used to be allocated after the barge-in fired, which put three
+        // PSRAM mallocs totalling 1.44MB between "the person started talking"
+        // and "the recorder started running". Everything they said in that gap
+        // was lost: replays came back missing their first syllable, most
+        // legibly as a count that a person began at 一 and the recording began
+        // at 二.
+        //
+        // Allocating up front leaves only afe_capture_begin() -- a handful of
+        // assignments -- on the path from the stop to the first recorded
+        // sample.
         const size_t cap = (size_t)max_rec_s * 16000;
         int16_t* bmic   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
         int16_t* bref   = (int16_t*)heap_caps_malloc(cap * 2, MALLOC_CAP_SPIRAM);
@@ -707,8 +701,37 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
             heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
             return "failed|stage=alloc";
         }
+
+        // --- 2. speak, until finished or interrupted ------------------------
+        if (player->play_wav_url(url.c_str(), (uint8_t)vol) != ESP_OK) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "failed|stage=speak_start";
+        }
+        while (player->is_playing()) vTaskDelay(pdMS_TO_TICKS(20));
+        // stop_requested_ surfaces as INVALID_STATE; that is what a barge-in
+        // looks like from here. Anything else means the clip simply ended.
+        const bool interrupted = player->last_result() != ESP_OK;
+        const int spoke_ms = player->spk_played_ms();
+        if (!interrupted) {
+            heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+            return "done|spoke=" + std::to_string(spoke_ms) +
+                   "ms not_interrupted";
+        }
+
+        // --- 3. record the interrupter --------------------------------------
+        // The AFE's clean output, so what gets played back is the speaker with
+        // the robot's own voice already removed -- the demo is the AEC.
+        // Measured from the BARGE-IN, not from "playback has stopped".
+        //
+        // The interval that matters runs from the instant the detector fired to
+        // the first recorded sample, and it contains three things: the player
+        // tearing down (T3.2 measures 21-32ms), the 20ms poll above noticing,
+        // and the capture starting. Timing only the last of those would report
+        // a number near zero while the replay still lost its first syllable.
         afe_capture_begin(bmic, bref, bclean, cap);
         const int64_t t_rec0 = esp_timer_get_time();
+        const int64_t t_fired = afe_last_bargein_us();
+        const int gap_ms = t_fired ? (int)((t_rec0 - t_fired) / 1000) : -1;
         // Record until the speaker has been quiet for end_silence_ms. Requiring
         // speech to have been heard first matters: the barge-in fires on the
         // first qualifying frame, so at this instant the silence timer can
@@ -803,9 +826,10 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         char out[224];
         snprintf(out, sizeof(out),
                  "done|quiet_wait=%dms spoke=%dms interrupted rec=%dms "
-                 "samples=%u peak=%d gain=%.1fx replayed=1 upload=%d file=%s",
+                 "samples=%u peak=%d gain=%.1fx gap=%dms replayed=1 upload=%d file=%s",
                  (int)((t_speak - t_wait0) / 1000), spoke_ms, rec_ms,
-                 (unsigned)nc, (int)peak, gain_q8 / 256.0, up ? 1 : 0, fname);
+                 (unsigned)nc, (int)peak, gain_q8 / 256.0, gap_ms, up ? 1 : 0,
+                 fname);
         return std::string(out);
 
 }

@@ -158,6 +158,16 @@ static int64_t s_last_speech_us;
 // mode: nothing sets it except an explicit capture argument.
 static volatile bool s_bargein_muted;
 
+// Timestamp of the most recent barge-in, recorded unconditionally.
+//
+// s_click_duck_us only exists when a click was armed, which is an E4 thing.
+// The echo demo needs to know how much of the person's speech falls between
+// the barge-in and the recorder starting -- that interval is exactly the audio
+// the replay cannot contain, and it was losing a whole syllable.
+static volatile int64_t s_last_bargein_us;
+
+int64_t afe_last_bargein_us(void) { return s_last_bargein_us; }
+
 void afe_bargein_mute(bool mute) { s_bargein_muted = mute; }
 
 static uint32_t s_gate_frames;      // frames examined while playing & past grace
@@ -577,6 +587,7 @@ static void fetch_task(void *arg)
                 // Timestamp in the device's own clock so barge-in latency can be
                 // measured without cross-device sync (E4).
                 const int64_t duck_us = esp_timer_get_time();
+                s_last_bargein_us = duck_us;
                 ESP_LOGI(TAG, "local barge-in -> duck+stop at t=%lld us", (long long)duck_us);
                 // E4: pair this with the raw-mic click onset. Only meaningful
                 // when a click was armed and seen for this turn.

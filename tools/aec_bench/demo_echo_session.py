@@ -46,22 +46,38 @@ def sh(host, cmd, timeout=120):
 
 def main():
     secs = int(sys.argv[1]) if len(sys.argv) > 1 else 300
-    print(f"回声循环会话 · {secs}s，树莓派全程录音\n")
+    # 10s of silence before the robot speaks again, not 5.
+    #
+    # It is a stronger assertion than it looks. The robot must not be tripped
+    # into starting by the tail of its own replay, and a person must have time
+    # to finish a turn before it talks over them. A shorter gate lets both slip
+    # through and the loop still "works", which is exactly the kind of pass
+    # that means nothing.
+    quiet_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
+    print(f"回声循环会话 · {secs}s，静音门槛 {quiet_ms}ms，树莓派全程录音\n")
 
     before = {c.get("id") for c in (device().get("commands") or [])
               if c.get("action") == "play_audio"}
 
     # Pi records the room for the whole session, a little longer than the loop
     # so the last replay cannot fall off the end.
-    sh("pi", f"rm -f {PI_WAV}; nohup arecord -D plughw:2,0 -f S16_LE -r 16000 "
-             f"-c 1 -d {secs + 20} {PI_WAV} >/dev/null 2>&1 & echo started")
+    # setsid + </dev/null + disown, not plain nohup: the backgrounded arecord is
+    # killed when the ssh channel closes, and the only symptom is a recording
+    # file that never appears.
+    sh("pi", f"rm -f {PI_WAV}; setsid arecord -D plughw:2,0 -f S16_LE -r 16000 "
+             f"-c 1 -d {secs + 20} {PI_WAV} </dev/null >/dev/null 2>&1 & disown; "
+             f"sleep 1; pgrep -c arecord")
     print("  🎙  树莓派已开始录音")
+    t_rec = time.time()
     time.sleep(2)
 
     r = post(f"{HUB}/command", {
         "action": "echo_demo",
-        "args": {"loop": True, "quiet_ms": 5000, "end_silence_ms": 800,
-                 "max_record_s": 15, "wait_s": 120, "volume": 80},
+        "args": {"loop": True, "quiet_ms": quiet_ms, "end_silence_ms": 800,
+                 # wait_s is the per-cycle patience for the room to go quiet.
+                 # With a 10s gate it must be well above 10s or a single cough
+                 # ends the cycle as "never quiet".
+                 "max_record_s": 15, "wait_s": 180, "volume": 80},
     })
     print(f"  ▶  循环已启动 ({r.get('command_id')})\n")
 
@@ -84,13 +100,17 @@ def main():
     st = device().get("state", {})
     print(f"     最终：轮次={st.get('echo_cycles')} 回声={st.get('echo_replies')}")
 
-    # Let arecord finish writing, then pull the room recording back.
-    print("\n  等待树莓派收尾 ...")
-    time.sleep(6)
-    sh("pi", "pkill -f 'arecord -D plughw:2,0' || true")
-    time.sleep(2)
+    # Let arecord reach its own -d limit and close the file cleanly. Killing it
+    # early leaves a truncated header that wave cannot open at all, which loses
+    # the entire recording rather than its last few seconds.
+    remain = (secs + 20) - (time.time() - t_rec) + 5
+    if remain > 0:
+        print(f"\n  等录音自然结束 {remain:.0f}s ...")
+        time.sleep(remain)
+    size = sh("pi", f"stat -c %s {PI_WAV} 2>/dev/null || echo 0")
+    print(f"  树莓派录音 {size} bytes")
     subprocess.run(["scp", f"pi:{PI_WAV}", "./echo_session.wav"],
-                   capture_output=True, timeout=300)
+                   capture_output=True, timeout=600)
     out = subprocess.run(
         ["python3", "-c",
          "import wave,audioop,math;w=wave.open('echo_session.wav');"

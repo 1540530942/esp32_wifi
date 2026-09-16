@@ -56,6 +56,12 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 // heartbeat. Reset by this accessor alone.
 bool afe_ref_peak_hold(float *peak_dbfs);
 
+// --- last barge-in timestamp ------------------------------------------------
+// esp_timer microseconds of the most recent barge-in, set on every one rather than only
+// when E4 has armed a click. The echo demo subtracts it from the moment
+// recording starts to get the speech the replay necessarily misses.
+int64_t afe_last_bargein_us(void);
+
 // --- E3 double-talk aid -----------------------------------------------------
 // Suppresses the barge-in ACTION while leaving detection and the gate counters
 // running. E3 has to observe the robot and a person speaking at the same time
