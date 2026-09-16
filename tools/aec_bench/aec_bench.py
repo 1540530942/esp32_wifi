@@ -51,20 +51,23 @@ def send_command(action, args, wait_s=240):
 ACTION_API = "https://www.wangyutang.cn/action/api"
 
 
+PI_CLIP_DIR = "/home/pi/action_move/local_audio"
+
+
 def pi_play(name, volume=70):
-    """让树莓派播一个已预置的素材（扮演人说话）。不等它播完就返回。
+    """让树莓派播一个已预置的素材（扮演人说话）。阻塞到播完。
 
     这套对话素材是严格一问一答的，天然没有重叠，所以双讲和打断必须由这里人为
     制造：先让 ESP32 开始播，再在指定时刻触发树莓派开口。
+
+    走 ssh aplay，不走 /action/api/tasks。那条队列从下发到出声约 8 秒，抖动比
+    重叠窗口本身还大——E4 因此被污染过，量出的"漏触发"其实是插话根本没落在
+    观察窗里。E3 旧做法靠"窗口开长 + 事后用 ASR 定位"绕开了这个问题，但既然
+    现在能精确控制，就不必再绕。
     """
-    body = json.dumps({"action": "play_local_audio", "params": {"name": name},
-                       "settings_override": {"voice_volume_percent": volume},
-                       "source": "aec_bench"})
-    out = sh(f"curl -s -m 15 -X POST '{ACTION_API}/tasks' "
-             f"-H 'Content-Type: application/json' -d '{body}'")
-    tid = json.loads(out)["task"]["id"]
-    print(f"  [pi_play] {name} vol={volume} task={tid}")
-    return tid
+    print(f"  [pi_play] {name} vol={volume} (ssh aplay)")
+    sh(f"ssh pi 'aplay -D plughw:2,0 {PI_CLIP_DIR}/{name}'")
+    return name
 
 
 def snapshot_uploads():

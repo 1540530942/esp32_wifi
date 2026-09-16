@@ -49,6 +49,13 @@ void afe_capture_end(size_t *mic_n, size_t *ref_n, size_t *clean_n);
 // Returns false if no playback has been observed yet.
 bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames);
 
+// --- E3 double-talk aid -----------------------------------------------------
+// Suppresses the barge-in ACTION while leaving detection and the gate counters
+// running. E3 has to observe the robot and a person speaking at the same time
+// for several seconds, which a working barge-in ends after ~150ms. Measurement
+// aid only; set from an explicit aec_capture argument and cleared afterwards.
+void afe_bargein_mute(bool mute);
+
 // --- silence timer ----------------------------------------------------------
 // Milliseconds since the last frame that was unambiguously speech (VAD said
 // speech AND it cleared the barge-in level gate). Reads as time-since-boot

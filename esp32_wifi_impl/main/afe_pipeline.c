@@ -131,6 +131,15 @@ bool afe_ref_level(float *peak_dbfs, uint32_t *clip_frames)
 // two different thresholds.
 static int64_t s_last_speech_us;
 
+// E3 needs sustained double-talk, and a working barge-in ends it after ~150ms.
+// This suppresses the ACTION while leaving detection and the counters running,
+// so a capture can hold the robot and the person talking at once for the full
+// overlap the experiment calls for. It is a measurement aid, not a product
+// mode: nothing sets it except an explicit capture argument.
+static volatile bool s_bargein_muted;
+
+void afe_bargein_mute(bool mute) { s_bargein_muted = mute; }
+
 static uint32_t s_gate_frames;      // frames examined while playing & past grace
 static uint32_t s_gate_loud;        // ... of those, clean_rms >= threshold
 static uint32_t s_gate_speech;      // ... of those, VAD said SPEECH
@@ -541,7 +550,8 @@ static void fetch_task(void *arg)
             if (loud_enough && is_speech) s_gate_both++;
         }
         if (playing && past_grace && loud_enough && is_speech) {
-            if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked) {
+            if (++speech_run >= CONFIG_AEC_BARGEIN_SPEECH_FRAMES && !ducked
+                    && !s_bargein_muted) {
                 // Timestamp in the device's own clock so barge-in latency can be
                 // measured without cross-device sync (E4).
                 const int64_t duck_us = esp_timer_get_time();

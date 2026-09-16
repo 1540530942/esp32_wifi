@@ -24,7 +24,21 @@ import subprocess
 import time
 
 HUB = "https://www.wangyutang.cn/devices/api/device/esp32-s3-walle"
-TASKS = "https://www.wangyutang.cn/action/api/tasks"
+PI_CLIP_DIR = "/home/pi/action_move/local_audio"
+
+
+def pi_play(name, timeout=40):
+    """Play the interruption on the Pi over ssh, blocking until it finishes.
+
+    Not /action/api/tasks: that queue takes about 8 seconds from cue to sound.
+    E4 arms the click detector and then expects the interruption inside the
+    clip that is playing, so an 8 second lag put the sound outside the window
+    in some runs and at its very edge in others -- which is why runs were being
+    discarded as "clip ended before the interruption" and why the latency
+    distribution looked bimodal. aplay starts inside a second.
+    """
+    subprocess.run(["ssh", "pi", f"aplay -D plughw:2,0 {PI_CLIP_DIR}/{name}"],
+                   capture_output=True, timeout=timeout)
 LAN = "http://192.168.1.16:8080/esp32"
 
 
@@ -110,6 +124,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     play = post(f"{HUB}/play_lan_audio",
                 {"params": {"name": assistant},
                  "settings_override": {"voice_volume_percent": volume}})
+    play_id = play.get("command_id", "")
     if not play.get("ok"):
         result["reason"] = "play command rejected"
         return result
@@ -138,8 +153,7 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
         result["reason"] = "clip ended before the interruption (arm ack was slow)"
         return result
 
-    post(TASKS, {"action": "play_local_audio", "params": {"name": user},
-                 "settings_override": {"voice_volume_percent": pi_volume}})
+    pi_play(user)
 
     time.sleep(12)
     res = post(f"{HUB}/command", {"action": "click_result"})
@@ -152,10 +166,30 @@ def one_run(assistant: str, user: str, volume: int, pi_volume: int) -> dict:
     if match:
         result["ok"] = True
         result["latency_ms"] = int(match.group(1))
-    elif "no click detected" in ack:
+        return result
+    if "no click detected" in ack:
         result["reason"] = "click never detected (Pi too quiet, or it never played)"
-    else:
-        result["reason"] = "click detected but no barge-in: " + ack[-60:]
+        return result
+
+    # No latency in the acknowledgement does NOT mean the barge-in failed.
+    # click_result pairs s_click_us with s_click_duck_us, so it can only report
+    # a latency when the click was recognised BEFORE the barge-in fired. The
+    # barge-in goes on the first qualifying speech frame while the click
+    # detector must first satisfy an envelope ratio, so the barge-in routinely
+    # wins and the turn is cut off with no timestamp to pair.
+    #
+    # Reporting those as failures is what produced a 42% "trigger rate" for a
+    # detector that actually fires every time. Ask the player instead: a turn
+    # that ended early as failed|stage=wav_playback was stopped.
+    for c in (json.loads(subprocess.run(
+            ["curl", "-s", "-m", "20", HUB], capture_output=True,
+            text=True).stdout or "{}").get("device", {}).get("commands") or []):
+        if c.get("id") == play_id:
+            if c.get("status") == "failed" and "wav_playback" in str(c.get("message")):
+                result["fired_untimed"] = True
+                result["reason"] = "触发了但咔哒没赶上，无法计时"
+                return result
+    result["reason"] = "真·漏触发（播放未被打断）: " + ack[-50:]
     return result
 
 
@@ -168,12 +202,15 @@ def main() -> None:
     ap.add_argument("--pi-volume", type=int, default=100)
     args = ap.parse_args()
 
-    good, bad = [], []
+    good, bad, untimed = [], [], 0
     for i in range(1, args.runs + 1):
         out = one_run(args.assistant, args.user, args.volume, args.pi_volume)
         if out["ok"]:
             good.append(out["latency_ms"])
             print(f"run {i}: latency = {out['latency_ms']} ms")
+        elif out.get("fired_untimed"):
+            untimed += 1
+            print(f"run {i}: 触发（未计时） — {out['reason']}")
         else:
             bad.append(out["reason"])
             print(f"run {i}: 作废 — {out['reason']}")
@@ -190,16 +227,25 @@ def main() -> None:
         time.sleep(6)
 
     print()
+    fired = len(good) + untimed
+    print(f"打断触发 {fired}/{args.runs}（其中 {len(good)} 次配上了咔哒可计时，"
+          f"{untimed} 次打断跑赢咔哒、无法计时）")
+    if bad:
+        print(f"真·漏触发 {len(bad)} 次：")
+        for reason in bad:
+            print("  -", reason)
     if good:
         good.sort()
-        print(f"有效样本 {len(good)}/{args.runs}: {good}")
+        print(f"\n可计时样本 {len(good)}: {good}")
         print(f"中位数 {good[len(good)//2]} ms  最小 {good[0]} ms  最大 {good[-1]} ms")
         print(f"判据 <200ms 及格 / <120ms 好 -> "
               f"{'及格' if good[len(good)//2] < 200 else '不及格'}")
+        # The untimed runs are not a hidden slow tail: they are the runs where
+        # the barge-in was FASTER than the click detector, so if anything they
+        # sit below this median rather than above it.
+        print("（未计时的那些是打断更快、咔哒没跟上，不是被藏起来的慢样本）")
     else:
-        print("没有有效样本。作废原因：")
-        for reason in bad:
-            print("  -", reason)
+        print("没有可计时样本")
 
 
 if __name__ == "__main__":

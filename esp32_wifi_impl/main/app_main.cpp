@@ -1220,6 +1220,8 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         // Record without driving playback: used to sample inside a far_end run.
         cJSON* np_it = a ? cJSON_GetObjectItem(a, "no_play") : nullptr;
         const bool no_play = cJSON_IsTrue(np_it);
+        cJSON* nb_it = a ? cJSON_GetObjectItem(a, "mute_bargein") : nullptr;
+        const bool mute_bargein = cJSON_IsTrue(nb_it);
         const char* tag = a ? [&]{ cJSON* t = cJSON_GetObjectItem(a, "tag");
                                    return cJSON_IsString(t) ? t->valuestring : "run"; }() : "run";
         std::string tagname = tag;
@@ -1248,6 +1250,9 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             }
         };
 
+        // E3: hold double-talk open for the whole window instead of letting the
+        // barge-in end it after ~150ms. Detection and the counters keep running.
+        afe_bargein_mute(mute_bargein);
         size_t nm = 0, nr = 0, nc = 0;
         if (no_play) {
             if (settle > 0) vTaskDelay(pdMS_TO_TICKS(settle * 1000));
@@ -1258,6 +1263,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             uint8_t* twav = nullptr; size_t tlen = 0;
             if (player->fetch_tts(tts_text, &twav, &tlen) != ESP_OK || tlen < 44) {
                 heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+                afe_bargein_mute(false);   // never leave the detector disabled
                 return "failed|stage=tts_fetch";
             }
             // TTS comes back at the cloud's rate (24 kHz); the codec runs at 16 kHz,
@@ -1302,6 +1308,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             s_volume = vol;
             if (player->play_wav_url(play_url, (uint8_t)vol) != ESP_OK) {
                 heap_caps_free(bmic); heap_caps_free(bref); heap_caps_free(bclean);
+                afe_bargein_mute(false);   // never leave the detector disabled
                 return "failed|stage=play_url";
             }
             if (settle > 0) vTaskDelay(pdMS_TO_TICKS(settle * 1000));
@@ -1321,6 +1328,7 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
             board_pa_enable(false);
         }
 
+        afe_bargein_mute(false);
         const std::string base = tagname + "_" + (no_play ? "sample" : !tts_text.empty() ? "tts" : (!play_url.empty() ? "speech" : (use_tone ? "tone" : "noise"))) + "_v" + std::to_string(vol);
         const bool o1 = aec_upload_wav((base + "_1_mic_raw.wav").c_str(),   bmic,   nm);
         const bool o2 = aec_upload_wav((base + "_2_reference.wav").c_str(), bref,   nr);
