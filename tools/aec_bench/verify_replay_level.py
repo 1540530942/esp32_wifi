@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""Prove whether the echo replay is actually audible in the room.
+"""Prove the echo replay actually comes out of the speaker, and how loud.
 
-The user reported hearing nothing on replay. The device said the command
-completed and the uploaded file had content, so "it played" and "it could be
-heard" had to be separated -- the only thing that settles it is a microphone in
-the room that is not the device's own.
+The Pi does double duty: it plays the part of the person who interrupts, and it
+records the room throughout. The room recording is the witness -- the device
+reporting "replayed=1" only means it wrote samples to the codec, and the whole
+reason this check exists is that a replay once reported success while producing
+no sound at all.
 
-The Pi records the whole cycle while also playing the part of the interrupter.
-Afterwards the recording contains, in order: the robot's turn, the Pi's
-interruption, then the replay. Comparing the replay's level against the robot's
-own turn in the SAME recording removes every variable that a level measured on
-the file alone leaves open -- speaker volume, distance, mic gain.
+Two things this gets right that the first version did not:
+
+* The interruption is played over ssh with aplay, not queued on the task API.
+  The task queue took about 8 seconds from cue to sound, by which point the
+  robot's turn had already ended -- so that run measured something which was
+  never an interruption at all. aplay starts inside a second.
+* The verdict compares what happens after the interruption against the robot's
+  own turn in the SAME recording, which cancels speaker volume, distance and
+  microphone gain.
+
+Ordering in a good recording: robot speaks, Pi interrupts, robot falls silent,
+replay comes back.
 """
 import json
 import subprocess
@@ -18,14 +26,16 @@ import sys
 import time
 
 HUB = "https://www.wangyutang.cn/devices/api/device/esp32-s3-walle"
-TASKS = "https://www.wangyutang.cn/action/api/tasks"
 PI_WAV = "/tmp/replay_check.wav"
+PI_CLIP = "/home/pi/action_move/local_audio/turn05_user.wav"
 OUT = "replay_check.wav"
+TOTAL = 60
+LEAD_S = 6.0          # how long the robot speaks before being interrupted
 
 
-def post(url, body, timeout=25):
+def post(body, timeout=25):
     p = subprocess.run(
-        ["curl", "-s", "-m", str(timeout), "-X", "POST", url,
+        ["curl", "-s", "-m", str(timeout), "-X", "POST", f"{HUB}/command",
          "-H", "Content-Type: application/json", "-d", json.dumps(body)],
         capture_output=True, text=True)
     try:
@@ -55,100 +65,92 @@ def sh(cmd, timeout=180):
 
 
 def main():
-    total = 70
-    before = {c.get("id") for c in (device().get("commands") or [])
-              if c.get("action") == "play_audio"}
-
-    # Clear the decks first. A cycle that starts while something is still
-    # coming out of the speaker fails at speak_start (the player is busy), and
-    # the leftover playback looks exactly like the robot taking its turn.
-    post(f"{HUB}/command", {"action": "stop_audio"})
-    for _ in range(20):
+    # Clear the decks: a cycle started while the speaker is still busy fails at
+    # speak_start, and the leftover playback looks exactly like the robot
+    # taking its turn.
+    post({"action": "stop_audio"})
+    for _ in range(15):
         if not device().get("state", {}).get("audio_playing"):
             break
         time.sleep(2)
-    else:
-        print("  ⚠ 播放器一直忙，继续可能失败")
-    time.sleep(3)
-
-    # setsid + </dev/null + disown, not plain nohup: the backgrounded arecord
-    # was being killed when the ssh channel closed, and the only symptom was a
-    # recording file that never appeared.
-    sh(f"rm -f {PI_WAV}; setsid arecord -D plughw:2,0 -f S16_LE -r 16000 -c 1 "
-       f"-d {total} {PI_WAV} </dev/null >/dev/null 2>&1 & disown; sleep 1; "
-       f"pgrep -c arecord")
-    print(f"  🎙  树莓派录音 {total}s")
     time.sleep(2)
 
-    cid = post(f"{HUB}/command", {
-        "action": "echo_demo",
-        "args": {"quiet_ms": 3000, "end_silence_ms": 800, "max_record_s": 12,
-                 "wait_s": 40, "volume": 80},
-    }).get("command_id")
+    # setsid + </dev/null + disown: a plain nohup'd arecord is killed when the
+    # ssh channel closes, and the only symptom is a file that never appears.
+    sh(f"rm -f {PI_WAV}; setsid arecord -D plughw:2,0 -f S16_LE -r 16000 -c 1 "
+       f"-d {TOTAL} {PI_WAV} </dev/null >/dev/null 2>&1 & disown; sleep 1; echo ok")
+    print(f"  🎙  树莓派录音 {TOTAL}s")
+    t_rec = time.time()
+    time.sleep(2)
+
+    cid = post({"action": "echo_demo",
+                "args": {"quiet_ms": 2000, "end_silence_ms": 800,
+                         "max_record_s": 12, "wait_s": 40, "volume": 80}}
+               ).get("command_id")
+    t0 = time.time()
     print(f"  ▶  echo_demo {cid}")
 
-    t0 = time.time()
-    while time.time() - t0 < 45:
-        if device().get("state", {}).get("audio_playing"):
-            print(f"  +{time.time()-t0:4.1f}s 机器人开口")
-            break
-        time.sleep(1)
-    time.sleep(4)
-    print(f"  +{time.time()-t0:4.1f}s 树莓派插话")
-    post(TASKS, {"action": "play_local_audio",
-                 "params": {"name": "turn05_user.wav"},
-                 "settings_override": {"voice_volume_percent": 80}})
+    # A fixed lead rather than waiting on audio_playing: that field rides the
+    # heartbeat and can be 5s stale, which is the same order as the window being
+    # aimed at. The device's own "spoke=" figure afterwards says whether the aim
+    # was good -- it should land near LEAD_S.
+    time.sleep(LEAD_S)
+    t_pi = time.time()
+    print(f"  🧑 +{t_pi-t0:4.1f}s 树莓派插话（aplay 直发）")
+    sh(f"aplay -D plughw:2,0 {PI_CLIP}", timeout=30)
+    print(f"      插话结束 +{time.time()-t0:4.1f}s")
 
     while time.time() - t0 < 90:
         rec = find(cid)
         if rec.get("status") in ("done", "failed"):
-            print(f"\n  设备：{rec.get('message')}")
+            print(f"\n  设备：{rec.get('status')} | {rec.get('message')}")
             break
         time.sleep(2)
 
-    # Watch the replay actually drive the speaker.
-    print("\n  等回放 ...")
-    t1 = time.time()
-    replay = None
-    while time.time() - t1 < 60:
-        for c in device().get("commands") or []:
-            if c.get("action") == "play_audio" and c.get("id") not in before:
-                replay = c
-                break
-        if replay and replay.get("status") in ("done", "failed"):
-            break
-        time.sleep(2)
-    if replay:
-        print(f"  回放命令 status={replay.get('status')} "
-              f"msg={replay.get('message')} "
-              f"file={str((replay.get('args') or {}).get('url','')).split('/')[-1]}")
-    else:
-        print("  没有回放命令")
-
-    # Let arecord reach its own -d limit and close the file cleanly; killing it
-    # early leaves a truncated header that wave cannot open.
-    remain = total - (time.time() - t0) + 6
+    remain = TOTAL - (time.time() - t_rec) + 5
     if remain > 0:
         print(f"  等录音自然结束 {remain:.0f}s ...")
         time.sleep(remain)
-    size = sh(f"stat -c %s {PI_WAV} 2>/dev/null || echo 0")
-    print(f"  树莓派录音文件 {size} bytes")
-    if size == "0":
-        print("  录音文件不存在，无法判读")
-        return 1
     subprocess.run(["scp", f"pi:{PI_WAV}", OUT], capture_output=True, timeout=300)
 
-    print("\n  房间录音逐秒电平（树莓派麦克风所听到的）：")
+    pi_at = t_pi - t_rec
+    print(f"\n  房间录音（插话约在 {pi_at:.0f}s 处，时长 4.1s）：")
     subprocess.run(["python3", "-c", f"""
 import wave, audioop, math
-w = wave.open({OUT!r})
-sr = w.getframerate()
+w = wave.open({OUT!r}); sr = w.getframerate()
+rows = []
 for s in range(w.getnframes() // sr):
     d = w.readframes(sr)
-    r = audioop.rms(d, 2)
-    db = 20*math.log10(max(r,1)/32768)
+    rows.append((s, 20*math.log10(max(audioop.rms(d,2),1)/32768)))
+pi_at = {pi_at:.0f}
+for s, db in rows:
+    mark = ' <- 插话' if pi_at <= s <= pi_at + 4 else ''
     bar = '#' * min(40, max(0, int((db + 60) / 1.5)))
-    print(f'    {{s:3d}}s  {{db:6.1f}} dBFS  {{bar}}')
+    print(f'    {{s:3d}}s  {{db:6.1f}} dBFS  {{bar}}{{mark}}')
+# Thresholds relative to the room's own floor, not absolutes. A fixed
+# -25 dBFS line missed both the robot's turn (-29.6) and the replay
+# (-27.4) while catching only the Pi, whose speaker sits against its own
+# microphone -- so the first run of this printed "no robot segment found"
+# and pointed at the Pi's tail as the replay.
+floor = sorted(db for _, db in rows)[len(rows) // 4]      # quiet quartile
+gate = floor + 12
+pi_end = pi_at + 4.1 + 1.0        # clip length, plus a second of slack
+robot = [(s, db) for s, db in rows if db > gate and s < pi_at]
+replay = [(s, db) for s, db in rows if db > gate and s > pi_end]
+print(f'  房间底噪 {floor:.1f} dBFS，判定门限 {gate:.1f} dBFS')
+if robot:
+    print(f'  机器人说话 {[s for s,_ in robot]}s  最大 {max(db for _,db in robot):.1f} dBFS')
+else:
+    print('  没找到机器人说话段 —— 这一轮无效')
+if replay:
+    rmax = max(db for _, db in replay)
+    print(f'  回放     {[s for s,_ in replay]}s  最大 {rmax:.1f} dBFS')
+    if robot:
+        print(f'  -> 回放出声了，比机器人自己的话 {rmax - max(db for _,db in robot):+.1f} dB')
+    else:
+        print('  -> 回放出声了')
+else:
+    print('  插话结束后没有任何声音 -> 回放没有出声')
 """])
     return 0
 
