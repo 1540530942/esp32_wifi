@@ -130,7 +130,7 @@ static std::string read_es7210_gain_regs(AudioPlayer* player) {
 // moved onto MQTT -- there is no reason to reintroduce it deliberately.
 // Result of the boot-time reference-level self-check, carried in the heartbeat
 // because this board has no serial console in normal use.
-static char s_ref_selftest[48] = "(not run)";
+static char s_ref_selftest[64] = "(not run)";
 static volatile bool s_echo_loop_on = false;
 static volatile bool s_echo_loop_stop = false;
 static volatile uint32_t s_echo_cycles = 0;    // turns the robot has spoken
@@ -1551,15 +1551,25 @@ extern "C" void app_main() {
         // heartbeat, so reading it across a multi-second utterance returns
         // whatever arrived after the last heartbeat rather than the peak.
         if (afe_ref_peak_hold(&peak)) {
-            const char* verdict = peak > -3.0f  ? "TOO HOT (clipping risk)"
-                                : peak > -6.0f  ? "hot"
-                                : peak < -20.0f ? "TOO QUIET"
-                                : peak < -12.0f ? "quiet"
-                                                : "ok";
-            snprintf(s_ref_selftest, sizeof(s_ref_selftest), "%s peak=%.1f", verdict, peak);
-            if (peak > -3.0f || peak < -20.0f) {
-                ESP_LOGW(TAG, "reference self-check: %s -- AEC will not behave; "
-                              "T1.3 wants -12..-6 dBFS", s_ref_selftest);
+            // Graded loosely ON PURPOSE. The announcement plays at
+            // BOOT_ANNOUNCE_VOLUME (40%), well below the working volume, so
+            // judging it against T1.3's -12..-6 band would report TOO QUIET on
+            // every healthy boot -- which it did, at -30.9 dBFS, a level that
+            // is exactly right for 40% (the sweep gives -19.0 at 60 and -14.0
+            // at 70). A check that always warns is not a check.
+            //
+            // What is worth catching at boot is the loopback being dead or the
+            // reference clipping. Calibration against T1.3's band belongs at
+            // the working volume, so the peak and the volume are reported for
+            // that rather than graded here.
+            const char* verdict = peak > -3.0f   ? "TOO HOT (clipping risk)"
+                                : peak < -60.0f  ? "REFERENCE ALMOST SILENT"
+                                                 : "ok";
+            snprintf(s_ref_selftest, sizeof(s_ref_selftest),
+                     "%s peak=%.1f @vol%d", verdict, peak, s_volume);
+            if (peak > -3.0f || peak < -60.0f) {
+                ESP_LOGW(TAG, "reference self-check: %s -- the AEC depends on a "
+                              "linear reference in a sane range", s_ref_selftest);
             } else {
                 ESP_LOGI(TAG, "reference self-check: %s", s_ref_selftest);
             }

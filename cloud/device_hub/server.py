@@ -19,6 +19,7 @@ import os
 import secrets
 import threading
 import time
+import audioop
 import urllib.request
 import urllib.error
 import io
@@ -815,6 +816,47 @@ _WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "�
 BOOT_ANNOUNCE_VOLUME = 40
 
 
+DEVICE_WAV_RATE = 16000
+
+
+def _to_device_wav(wav_bytes: bytes) -> bytes:
+    """Resample a TTS WAV to the rate the ESP32's WAV player accepts.
+
+    The device's raw-HTTP WAV path rejects anything that is not PCM 16-bit mono
+    at 16 kHz -- it returns ESP_ERR_NOT_SUPPORTED without playing a sample. The
+    TTS service returns 24 kHz, so every boot announcement had been failing:
+
+        play_audio failed  stage=wav_playback error=ESP_ERR_NOT_SUPPORTED
+
+    It failed silently in the worst way -- no sound is indistinguishable from
+    "it had nothing to say", so nobody noticed until a reference-level
+    self-check reported the loopback seeing nothing during an announcement that
+    never actually played.
+
+    Resampling here rather than on the device follows the convention the task
+    list already sets: the ESP32 side gets 16 kHz transcodes because the codec
+    requires it.
+    """
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels, width, rate = wf.getnchannels(), wf.getsampwidth(), wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+    if width != 2:
+        frames = audioop.lin2lin(frames, width, 2)
+        width = 2
+    if channels > 1:
+        frames = audioop.tomono(frames, width, 0.5, 0.5)
+        channels = 1
+    if rate != DEVICE_WAV_RATE:
+        frames, _ = audioop.ratecv(frames, width, channels, rate, DEVICE_WAV_RATE, None)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as ow:
+        ow.setnchannels(1)
+        ow.setsampwidth(2)
+        ow.setframerate(DEVICE_WAV_RATE)
+        ow.writeframes(frames)
+    return out.getvalue()
+
+
 def _boot_announce_for(device_id: str) -> Any:
     """生成开机播报并通过 MQTT 下发 play_audio（40%音量）。"""
     with DATA_LOCK:
@@ -840,6 +882,12 @@ def _boot_announce_for(device_id: str) -> Any:
         return _err(502, "tts_error", f"TTS 服务不可达: {e}")
 
     filename = "boot-" + secrets.token_hex(8) + ".wav"
+    try:
+        wav_bytes = _to_device_wav(wav_bytes)
+    except Exception as exc:                                   # noqa: BLE001
+        # Better to send the original and have the device reject it than to
+        # drop the announcement entirely; the failure is visible either way.
+        print(f"boot announce resample failed: {exc}", flush=True)
     (AUDIO_DIR / filename).write_bytes(wav_bytes)
     audio_url = f"{AUDIO_PUBLIC_BASE}/{filename}"
     args = {"url": audio_url, "volume": BOOT_ANNOUNCE_VOLUME}
