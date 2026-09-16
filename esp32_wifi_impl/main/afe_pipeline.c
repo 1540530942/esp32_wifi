@@ -23,11 +23,12 @@
 
 static const char *TAG = "afe";
 
-static char s_cfg_summary[320] = "(afe not initialised)";
+static char s_cfg_summary[420] = "(afe not initialised)";
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t  *s_afe_data;
 static afe_audio_cb_t      s_audio_cb;
 static int s_feed_chunksize;      // samples per channel per feed
+static int s_fetch_chunksize;     // samples per fetch == one barge-in frame
 static int s_feed_nch;            // total channels fed (== strlen(input_format))
 static int s_ref_index = -1;      // index of the 'R' channel, for software ref
 
@@ -702,6 +703,27 @@ esp_err_t afe_pipeline_init(afe_audio_cb_t on_clean_audio)
 
     s_feed_chunksize = s_afe->get_feed_chunksize(s_afe_data);
     s_feed_nch       = s_afe->get_feed_channel_num(s_afe_data);
+    // The FETCH chunk is the barge-in frame: speech_frames and silence_frames
+    // are counted in these, so it is what converts them into milliseconds.
+    // T3.1 asks for "about 320ms of silence ends the interruption" and the
+    // device reports silence_frames=20, which is 320ms only if this is 256
+    // samples. Inferring it from capture remainders was not safe -- the
+    // shortfall in a capture is the UNFETCHED part of a chunk, so a 512 sample
+    // remainder implies the chunk is larger than 512, which would make those
+    // 20 frames 640ms and put T3.1 at twice its specification. Read it out
+    // instead of reasoning about it.
+    s_fetch_chunksize = s_afe->get_fetch_chunksize(s_afe_data);
+    // Appended here because the chunk sizes do not exist until the AFE is
+    // created, which is after the summary above is first built.
+    {
+        const size_t used = strlen(s_cfg_summary);
+        snprintf(s_cfg_summary + used, sizeof(s_cfg_summary) - used,
+                 " feed_chunk=%d fetch_chunk=%d frame_ms=%.1f silence_ms=%.0f",
+                 s_feed_chunksize, s_fetch_chunksize,
+                 s_fetch_chunksize * 1000.0f / AEC_SAMPLE_RATE_HZ,
+                 CONFIG_AEC_BARGEIN_SILENCE_FRAMES * s_fetch_chunksize * 1000.0f
+                     / AEC_SAMPLE_RATE_HZ);
+    }
     ESP_LOGI(TAG, "AFE ready: fmt=\"%s\" feed_chunk=%d nch=%d ref_ch=%d aec=on",
              fmt, s_feed_chunksize, s_feed_nch, s_ref_index);
 
