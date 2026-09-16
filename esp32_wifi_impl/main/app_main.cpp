@@ -1093,8 +1093,21 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
     if (cmd.action == "click_result") {
         int64_t click_us = 0, duck_us = 0;
         int latency_ms = -1;
+        // The gate counters must come back whether or not a click was seen.
+        // E5 has no click source at all -- the Pi is silent by definition -- so
+        // this early return left four of five false barge-ins with no
+        // attribution, which is exactly the case the counters exist for.
+        uint32_t f0 = 0, l0 = 0, sp0 = 0, b0 = 0;
+        int32_t mr0 = 0;
+        afe_gate_stats(&f0, &l0, &sp0, &b0, &mr0);
         if (!afe_click_result(&click_us, &duck_us, &latency_ms)) {
-            return "done|no click detected since arming";
+            char nc[160];
+            snprintf(nc, sizeof(nc),
+                     "done|no click detected since arming "
+                     "frames=%u loud=%u speech=%u both=%u max_rms=%d",
+                     (unsigned)f0, (unsigned)l0, (unsigned)sp0, (unsigned)b0,
+                     (int)mr0);
+            return std::string(nc);
         }
         // Carry the gate counters on both outcomes. On a miss they say which
         // condition held the barge-in back; on a hit they give the margin it

@@ -100,6 +100,12 @@ def main():
                 stats = ack(post({"action": "click_result"}).get("command_id", ""))
                 keep = " ".join(w for w in stats.split() if w.split("=")[0] in
                                 ("frames", "loud", "speech", "both", "max_rms"))
+                if not keep:
+                    # Older firmware dropped the counters on the no-click path,
+                    # which is every E5 cut since the Pi is silent by
+                    # definition. Show the raw reply so a missing figure is
+                    # visibly missing rather than an empty line.
+                    keep = f"(原始回执: {stats[:90]})"
                 print(f"  {name}: **被切断**  {status.get('message','')[:40]}")
                 print(f"      门限归因: {keep}")
             else:
