@@ -185,6 +185,8 @@ def main():
     ap.add_argument("--no-play", action="store_true", help="纯录音不播放（E2b）")
     ap.add_argument("--pi-play", default="", help="同时让树莓派播这个素材（扮演人）")
     ap.add_argument("--pi-volume", type=int, default=70)
+    ap.add_argument("--mute-bargein", action="store_true",
+                    help="采集期间只统计打断、不执行（E3 需要双讲持续下去）")
     ap.add_argument("--pi-delay", type=float, default=0.0,
                     help="树莓派开口相对采集开始的延迟秒数（E3 靠这个制造双讲重叠）")
     args = ap.parse_args()
@@ -199,6 +201,8 @@ def main():
         cap_args["no_play"] = True
     elif args.url:
         cap_args["url"] = args.url
+    if args.mute_bargein:
+        cap_args["mute_bargein"] = True
 
     before = snapshot_uploads()
 
