@@ -258,6 +258,24 @@ config AEC_BARGEIN_EARLY_FRAMES
       with the 24 ms measured stop that is ~152 ms end to end, still inside the
       200 ms budget.
 
+config AEC_ENDPOINT_MIN_RMS
+    int "AFE-output RMS that still counts as the person talking"
+    default 40
+    help
+      The continuation threshold, deliberately far below AEC_BARGEIN_MIN_RMS.
+
+      Starting an interruption and continuing one are different questions.
+      Starting needs the high bar or the robot's own residual triggers it;
+      continuing does not, because by then somebody is known to be speaking and
+      there is nothing left to falsely trigger.
+
+      Measured: with the same bar for both, a speaker 6 dB quieter had their
+      recording end at 2.1s instead of 4.5s -- the level dips below 150 during
+      the pauses inside a sentence and end-of-speech fires mid-utterance. 40 is
+      the value the barge-in gate itself used before the false-trigger work
+      moved it to 150, and it is still well clear of the robot-alone residual
+      median of 30.
+
 config AEC_BARGEIN_SILENCE_FRAMES
     int "Sustained AFE silence frames before un-ducking a false trigger"
     default 10

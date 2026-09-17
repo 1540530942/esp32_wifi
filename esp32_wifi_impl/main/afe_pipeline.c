@@ -170,6 +170,19 @@ bool afe_ref_peak_hold(float *peak_dbfs)
 // two different thresholds.
 static int64_t s_last_speech_us;
 
+// A SECOND silence timer, on a lower threshold.
+//
+// Starting an interruption and continuing one are different questions. Starting
+// needs a high bar (150) or the robot's own residual triggers it. Continuing
+// does not: once somebody is known to be talking there is nothing left to
+// falsely trigger, and holding the same high bar means a quieter voice drops
+// below it during the natural pauses inside a sentence -- measured, a person
+// 6 dB down had their recording end at 2.1s instead of 4.5s, cut off mid
+// sentence.
+//
+// So: s_last_speech_us gates starting, s_last_voice_us gates ending.
+static int64_t s_last_voice_us;
+
 // E3 needs sustained double-talk, and a working barge-in ends it after ~150ms.
 // This suppresses the ACTION while leaving detection and the counters running,
 // so a capture can hold the robot and the person talking at once for the full
@@ -194,6 +207,12 @@ static uint32_t s_gate_loud;        // ... of those, clean_rms >= threshold
 static uint32_t s_gate_speech;      // ... of those, VAD said SPEECH
 static uint32_t s_gate_both;        // ... of those, both at once
 static int32_t  s_gate_max_rms;     // loudest AFE frame seen in the window
+
+int64_t afe_voice_silence_ms(void)
+{
+    // Same shape as afe_silence_ms() but on the lower, continuation threshold.
+    return (esp_timer_get_time() - s_last_voice_us) / 1000;
+}
 
 int64_t afe_silence_ms(void)
 {
@@ -603,6 +622,8 @@ static void fetch_task(void *arg)
         // needed most when it is not (waiting for the room to go quiet, and
         // waiting for the user to finish).
         if (loud_enough && is_speech) s_last_speech_us = esp_timer_get_time();
+        if (is_speech && clean_rms >= CONFIG_AEC_ENDPOINT_MIN_RMS)
+            s_last_voice_us = esp_timer_get_time();
         if (playing && past_grace) {
             s_gate_frames++;
             if (clean_rms > s_gate_max_rms) s_gate_max_rms = clean_rms;

@@ -780,11 +780,17 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
         // first qualifying frame, so at this instant the silence timer can
         // still read above the threshold and the recording would close
         // immediately, capturing nothing.
+        // "Have they finished" uses the LOWER continuation threshold. With the
+        // barge-in threshold on both ends, a speaker 6 dB down had this fire
+        // inside their own sentence and the recording came back at 2.1s
+        // instead of 4.5s. Starting still needs the high bar -- that is what
+        // keeps the robot's own residual from triggering -- but once somebody
+        // is known to be talking there is nothing left to falsely trigger.
         bool heard = false;
         while (true) {
             const int64_t elapsed = esp_timer_get_time() - t_rec0;
             if (elapsed > (int64_t)max_rec_s * 1000000) break;
-            const int64_t sil = afe_silence_ms();
+            const int64_t sil = afe_voice_silence_ms();
             if (!heard && sil < 300) heard = true;
             if (heard && sil >= end_sil_ms) break;
             vTaskDelay(pdMS_TO_TICKS(20));

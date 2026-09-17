@@ -80,6 +80,15 @@ int64_t afe_last_bargein_us(void);
 // aid only; set from an explicit aec_capture argument and cleared afterwards.
 void afe_bargein_mute(bool mute);
 
+// --- end-of-speech timer ----------------------------------------------------
+// Milliseconds since the last frame that was speech above the LOWER
+// continuation threshold (AEC_ENDPOINT_MIN_RMS), as opposed to the barge-in
+// threshold. Use this to decide "have they finished", never to decide "have
+// they started": starting needs the high bar or the robot's own residual
+// trips it, while holding that bar for continuation cuts a quieter speaker off
+// inside their own sentence.
+int64_t afe_voice_silence_ms(void);
+
 // --- silence timer ----------------------------------------------------------
 // Milliseconds since the last frame that was unambiguously speech (VAD said
 // speech AND it cleared the barge-in level gate). Reads as time-since-boot
