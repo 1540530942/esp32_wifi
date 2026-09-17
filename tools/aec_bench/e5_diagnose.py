@@ -128,6 +128,16 @@ def main():
             else:
                 print(f"  {name}: 完整   max_rms={mx}")
     print(f"\n{played} 段里被切 {cuts} 段")
+    # Accumulate across soaks. A single soak's largest draw is not the
+    # distribution's upper bound -- one sample topped out at 94 and the next at
+    # 140 against a gate of 150, and the 94 had been used to claim 1.6x of
+    # margin. Only a tail built from many soaks can answer where the gate
+    # belongs.
+    import datetime
+    with open("docs/logs/e5_maxima.jsonl", "a") as f:
+        f.write(json.dumps({
+            "at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "clips": played, "cuts": cuts, "maxima": maxima}) + "\n")
     if maxima:
         maxima.sort()
         n = len(maxima)
