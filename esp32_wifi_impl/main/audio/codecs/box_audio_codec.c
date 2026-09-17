@@ -1,3 +1,4 @@
+#include "esp_log.h"
 #include "box_audio_codec.h"
 #include "sdkconfig.h"
 #include <esp_log.h>
@@ -100,6 +101,41 @@ static void box_create_duplex_channels(AudioCodec* codec, gpio_num_t mclk, gpio_
     ESP_ERROR_CHECK(i2s_channel_init_tdm_mode(codec->rx_handle, &tdm_cfg));
 }
 
+// --- codec health -----------------------------------------------------------
+// Set when any esp_codec_dev_* call fails, which in practice means the I2C bus
+// to ES8311/ES7210 is not answering.
+//
+// This used to be fatal. box_set_output_volume called ESP_ERROR_CHECK, so a
+// codec that would not open took the whole device down: abort -> reboot ->
+// codec still dead -> abort, about every six seconds, never staying up long
+// enough to finish connecting. From the cloud the device simply vanished, and
+// the only way to learn why was a serial cable. A power cycle did not clear it
+// either, because the fault is on the I2C bus itself.
+//
+// A dead codec is a real fault and must be visible, but taking the radio, the
+// heartbeat and every diagnostic command down with it removes the only means
+// of finding out. So the failure is recorded and reported instead, and the
+// device stays up deaf and mute rather than disappearing.
+//
+// The read/write paths on either side of this already used
+// ESP_ERROR_CHECK_WITHOUT_ABORT; only volume did not. Two conventions in one
+// file, and the aborting one was the outlier.
+static volatile bool s_codec_failed;
+static volatile int  s_codec_fail_count;
+
+bool box_codec_failed(void) { return s_codec_failed; }
+int  box_codec_fail_count(void) { return s_codec_fail_count; }
+
+#define CODEC_TRY(expr) do {                                                   \
+    const esp_err_t _e = (expr);                                               \
+    if (_e != ESP_OK) {                                                        \
+        s_codec_failed = true;                                                 \
+        s_codec_fail_count++;                                                  \
+        ESP_LOGE("box_codec", "%s failed: %s (总计 %d 次)",                     \
+                 #expr, esp_err_to_name(_e), s_codec_fail_count);              \
+    }                                                                          \
+} while (0)
+
 static int box_read(AudioCodec* codec, int16_t* dest, int samples) {
     BoxAudioCodec* box = box_cast(codec);
     if (codec->input_enabled) {
@@ -118,7 +154,7 @@ static int box_write(AudioCodec* codec, const int16_t* data, int samples) {
 
 static void box_set_output_volume(AudioCodec* codec, int volume) {
     BoxAudioCodec* box = box_cast(codec);
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(box->output_dev, volume));
+    CODEC_TRY(esp_codec_dev_set_out_vol(box->output_dev, volume));
 }
 
 static void box_enable_input(AudioCodec* codec, bool enable) {
@@ -137,7 +173,7 @@ static void box_enable_input(AudioCodec* codec, bool enable) {
         if (codec->input_reference) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
-        ESP_ERROR_CHECK(esp_codec_dev_open(box->input_dev, &fs));
+        CODEC_TRY(esp_codec_dev_open(box->input_dev, &fs));
         // Set both channels explicitly, and only after open() -- open() runs
         // _update_codec_setting(), which writes the handle's default gain to
         // every channel, so anything written earlier is overwritten here.
@@ -145,16 +181,16 @@ static void box_enable_input(AudioCodec* codec, bool enable) {
         // sitting on that default rather than on a chosen value; measuring it
         // is what turned this from an assumption into a decision. See
         // CONFIG_AEC_REF_PGA_GAIN_DB for why the reference wants 0 dB.
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(
+        CODEC_TRY(esp_codec_dev_set_in_channel_gain(
             box->input_dev, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
             (float)CONFIG_AEC_MIC_PGA_GAIN_DB));
         if (codec->input_reference) {
-            ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(
+            CODEC_TRY(esp_codec_dev_set_in_channel_gain(
                 box->input_dev, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1),
                 (float)CONFIG_AEC_REF_PGA_GAIN_DB));
         }
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(box->input_dev));
+        CODEC_TRY(esp_codec_dev_close(box->input_dev));
     }
     codec->input_enabled = enable;
 }
@@ -172,10 +208,10 @@ static void box_enable_output(AudioCodec* codec, bool enable) {
             .sample_rate = (uint32_t)codec->output_sample_rate,
             .mclk_multiple = 0,
         };
-        ESP_ERROR_CHECK(esp_codec_dev_open(box->output_dev, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(box->output_dev, codec->output_volume));
+        CODEC_TRY(esp_codec_dev_open(box->output_dev, &fs));
+        CODEC_TRY(esp_codec_dev_set_out_vol(box->output_dev, codec->output_volume));
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(box->output_dev));
+        CODEC_TRY(esp_codec_dev_close(box->output_dev));
     }
     codec->output_enabled = enable;
 }
@@ -199,9 +235,9 @@ int BoxAudioCodec_ReadInputReg(AudioCodec* codec, int reg, uint8_t* value) {
 
 static void box_destroy(AudioCodec* codec) {
     BoxAudioCodec* box = box_cast(codec);
-    ESP_ERROR_CHECK(esp_codec_dev_close(box->output_dev));
+    CODEC_TRY(esp_codec_dev_close(box->output_dev));
     esp_codec_dev_delete(box->output_dev);
-    ESP_ERROR_CHECK(esp_codec_dev_close(box->input_dev));
+    CODEC_TRY(esp_codec_dev_close(box->input_dev));
     esp_codec_dev_delete(box->input_dev);
     audio_codec_delete_codec_if(box->in_codec_if);
     audio_codec_delete_ctrl_if(box->in_ctrl_if);

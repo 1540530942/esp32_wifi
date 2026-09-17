@@ -34,4 +34,13 @@ int BoxAudioCodec_ReadInputReg(AudioCodec* codec, int reg, uint8_t* value);
 }
 #endif
 
+
+// --- codec health -----------------------------------------------------------
+// True once any esp_codec_dev_* call has failed, which in practice means the
+// I2C bus to ES8311/ES7210 stopped answering. Reported in the heartbeat so the
+// fault is visible without a serial cable -- it previously took the device down
+// in a six-second reboot loop, and from the cloud it simply disappeared.
+bool box_codec_failed(void);
+int  box_codec_fail_count(void);
+
 #endif

@@ -402,6 +402,10 @@ static std::string device_state() {
     // Echo-loop progress. The loop runs unattended for minutes at a time and
     // there is no serial console on this board, so without these the only
     // evidence it is alive is audio in the room.
+    // Codec health. A dead I2C bus to the audio chips used to take the device
+    // down in a reboot loop; now it stays up and says so here.
+    cJSON_AddBoolToObject(state, "codec_failed", box_codec_failed());
+    cJSON_AddNumberToObject(state, "codec_fail_count", (double)box_codec_fail_count());
     cJSON_AddStringToObject(state, "ref_selftest", s_ref_selftest);
     cJSON_AddBoolToObject(state, "echo_loop", s_echo_loop_on);
     cJSON_AddNumberToObject(state, "echo_cycles", (double)s_echo_cycles);
