@@ -1190,6 +1190,34 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         afe_config_summary(sum, sizeof(sum));
         return std::string("done|") + sum;
     }
+    if (cmd.action == "i2c_lines") {
+        // Read the idle levels of the codec I2C pins.
+        //
+        // Both codecs stopped answering and a power cycle did not clear it,
+        // which leaves two very different hardware faults: the bus itself is
+        // dead (a line shorted low, missing pull-ups, broken ground), or the
+        // bus is fine and the chips are unpowered or failed. Those are searched
+        // for in different places, and the idle levels separate them: a healthy
+        // I2C bus idles HIGH on both lines because of its pull-ups, so a line
+        // sitting LOW while nothing is transacting is being held down.
+        //
+        // gpio_get_level reads the input register, so this reports the actual
+        // line state without reconfiguring pins the I2C driver owns.
+        const int sda = gpio_get_level(AUDIO_CODEC_I2C_SDA_PIN);
+        const int scl = gpio_get_level(AUDIO_CODEC_I2C_SCL_PIN);
+        char out[192];
+        const char* verdict =
+            (sda && scl) ? "both HIGH -- bus idles correctly, so the lines and "
+                           "pull-ups are fine; look at codec power or the chips"
+          : (!sda && !scl) ? "both LOW -- neither line can rise: pull-ups, "
+                             "supply or ground"
+          : !sda ? "SDA held LOW -- a slave is clamping it, or SDA is shorted"
+                 : "SCL held LOW -- SCL is shorted or driven";
+        snprintf(out, sizeof(out), "done|sda(GPIO%d)=%d scl(GPIO%d)=%d  %s",
+                 (int)AUDIO_CODEC_I2C_SDA_PIN, sda,
+                 (int)AUDIO_CODEC_I2C_SCL_PIN, scl, verdict);
+        return std::string(out);
+    }
     if (cmd.action == "es7210_regs") {
         // Read-only I2C register read; safe while audio is running, so no
         // is_playing() guard -- the point is to be able to check the AEC
