@@ -14,6 +14,10 @@ extern "C" {
 }
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -1189,6 +1193,61 @@ static std::string handle_command(const HubCommand& cmd, AudioPlayer* player) {
         char sum[420];
         afe_config_summary(sum, sizeof(sum));
         return std::string("done|") + sum;
+    }
+    if (cmd.action == "i2c_scan") {
+        // Full 7-bit address scan of the codec I2C bus, not just the two
+        // addresses the driver already knows (ES8311 0x18, ES7210 0x40 --
+        // "dev 30"/"dev 82" in the earlier logs are those shifted left by 1).
+        // Both stopped answering; a scan says whether NOTHING is on the bus at
+        // all (chips unpowered or dead) or something answers somewhere
+        // unexpected (address-select pins misread, or a swapped part).
+        // i2c_master_probe issues just the address byte and checks for ACK, so
+        // this needs no register knowledge of whatever might respond.
+        if (player == nullptr) return "failed|no player";
+        i2c_master_bus_handle_t bus = player->i2c_bus();
+        if (bus == nullptr) return "failed|no i2c bus handle";
+        std::string found;
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (i2c_master_probe(bus, addr, 20) == ESP_OK) {
+                char h[8];
+                snprintf(h, sizeof(h), "0x%02X ", addr);
+                found += h;
+            }
+        }
+        return found.empty() ? "done|no ACK from any address 0x08-0x77 -- bus is truly silent"
+                             : "done|ACK from: " + found;
+    }
+    if (cmd.action == "adc_read") {
+        // One-shot ADC read on a free, ADC1-capable pin (GPIO9, ADC1_CH8; free
+        // because nothing on this board uses it -- see audio_board_config.h).
+        // Meant for a jumper from a suspect voltage (codec VDD, an enable line)
+        // to this pin, to tell "rail present" from "rail missing" without a
+        // multimeter in hand. ESP32 ADC input must stay within 0-3.3V; do not
+        // wire anything higher into it.
+        adc_oneshot_unit_handle_t unit = nullptr;
+        adc_oneshot_unit_init_cfg_t ucfg = { .unit_id = ADC_UNIT_1 };
+        esp_err_t err = adc_oneshot_new_unit(&ucfg, &unit);
+        if (err != ESP_OK) return "failed|adc_oneshot_new_unit " + std::string(esp_err_to_name(err));
+        adc_oneshot_chan_cfg_t ccfg = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
+        err = adc_oneshot_config_channel(unit, ADC_CHANNEL_8, &ccfg);
+        if (err != ESP_OK) { adc_oneshot_del_unit(unit); return "failed|config_channel " + std::string(esp_err_to_name(err)); }
+        int raw = 0;
+        err = adc_oneshot_read(unit, ADC_CHANNEL_8, &raw);
+        if (err != ESP_OK) { adc_oneshot_del_unit(unit); return "failed|read " + std::string(esp_err_to_name(err)); }
+        int mv = -1;
+        adc_cali_handle_t cali = nullptr;
+        adc_cali_curve_fitting_config_t cali_cfg = {
+            .unit_id = ADC_UNIT_1, .chan = ADC_CHANNEL_8,
+            .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali) == ESP_OK) {
+            adc_cali_raw_to_voltage(cali, raw, &mv);
+            adc_cali_delete_scheme_curve_fitting(cali);
+        }
+        adc_oneshot_del_unit(unit);
+        char out[96];
+        snprintf(out, sizeof(out), "done|gpio9 raw=%d mv=%d", raw, mv);
+        return std::string(out);
     }
     if (cmd.action == "i2c_lines") {
         // Read the idle levels of the codec I2C pins.

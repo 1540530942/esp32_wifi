@@ -19,6 +19,12 @@ public:
                            int pa_level = 1);
     esp_err_t stop();
     AudioCodec* codec() const { return codec_; }
+    // For a hardware-fault scan (see app_main's i2c_scan command): both codecs
+    // stopped answering their known addresses, and probing every 7-bit address
+    // on the same bus tells whether NOTHING is present (chips unpowered/dead)
+    // or something answers at an unexpected address (misconfigured address
+    // pins, or a part swapped for the wrong one).
+    i2c_master_bus_handle_t i2c_bus() const { return i2c_bus_; }
     bool is_playing() const { return busy_.load(); }
     esp_err_t last_result() const { return last_result_; }
     const std::string& last_error() const { return last_error_; }
