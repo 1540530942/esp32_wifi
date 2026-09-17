@@ -710,6 +710,7 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
             return "failed|stage=speak_start";
         }
         bool interrupted;
+        int64_t t_detect = 0;    // beta: when the person was heard
         if (!keep_talking) {
             // Alpha: the barge-in stops playback, so waiting for the player to
             // finish is waiting for the interruption.
@@ -732,7 +733,11 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
             vTaskDelay(pdMS_TO_TICKS(CONFIG_AEC_BARGEIN_ONSET_GRACE_MS + 300));
             interrupted = false;
             while (player->is_playing()) {
-                if (afe_silence_ms() < 200) { interrupted = true; break; }
+                if (afe_silence_ms() < 200) {
+                    interrupted = true;
+                    t_detect = esp_timer_get_time();
+                    break;
+                }
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
         }
@@ -763,8 +768,13 @@ static std::string echo_demo_cycle(AudioPlayer* player, const std::string& url,
                                             pre_want < cap ? pre_want : cap);
         afe_capture_begin(bmic, bref, bclean + pre, cap - pre);
         const int64_t t_rec0 = esp_timer_get_time();
-        const int64_t t_fired = afe_last_bargein_us();
-        const int gap_ms = t_fired ? (int)((t_rec0 - t_fired) / 1000) : -1;
+        // In beta the barge-in is muted and never fires, so its timestamp is
+        // stale from a previous cycle -- reading it there reported gap=136869ms,
+        // a number with no meaning that would have gone into the record as if
+        // it had one. The equivalent quantity in beta is "person heard ->
+        // recorder running", which is what t_detect marks.
+        const int64_t t_from = keep_talking ? t_detect : afe_last_bargein_us();
+        const int gap_ms = t_from ? (int)((t_rec0 - t_from) / 1000) : -1;
         // Record until the speaker has been quiet for end_silence_ms. Requiring
         // speech to have been heard first matters: the barge-in fires on the
         // first qualifying frame, so at this instant the silence timer can
