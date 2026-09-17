@@ -1689,11 +1689,24 @@ extern "C" void app_main() {
     xTaskCreate(mic_asr_button_task, "mic_asr_btn", 8192, nullptr, 5, nullptr);
 
     // esp-sr AFE full-duplex voice path (mic -> AEC -> /ws/audio, TTS back).
+    //
+    // ws_client_start() is gated behind CONFIG_AEC_STREAM_TO_CLOUD (off by
+    // default): P4's cloud streaming is explicitly "本阶段之后" in the task
+    // list, and this connection never stabilised, reconnecting every 20-50s
+    // for hours while free_internal sat at ~2.5KB with a largest contiguous
+    // block of ~1152 bytes. That is small enough that HTTPS heartbeat never
+    // once completed its handshake, and is a plausible cause of a five-hour
+    // silent hang that a serial-triggered reset immediately cleared. Local
+    // barge-in and the AFE pipeline need none of it -- they run entirely on
+    // the device.
     afe_board_bind_codec(audio_player.codec());
-    if (board_init() == ESP_OK &&
-        playback_init(aec_on_tts_state) == ESP_OK &&
-        ws_client_start() == ESP_OK &&
-        afe_pipeline_init(aec_on_clean_audio) == ESP_OK) {
+    bool aec_ok = board_init() == ESP_OK && playback_init(aec_on_tts_state) == ESP_OK;
+#if CONFIG_AEC_STREAM_TO_CLOUD
+    aec_ok = aec_ok && ws_client_start() == ESP_OK;
+#else
+    ESP_LOGI(TAG, "AEC_STREAM_TO_CLOUD off; P4 cloud stream not started");
+#endif
+    if (aec_ok && afe_pipeline_init(aec_on_clean_audio) == ESP_OK) {
         ESP_LOGI(TAG, "AEC full-duplex pipeline started");
     } else {
         ESP_LOGE(TAG, "AEC pipeline init failed; continuing half-duplex");

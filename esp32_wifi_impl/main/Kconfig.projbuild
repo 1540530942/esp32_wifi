@@ -69,6 +69,30 @@ config AEC_LOCAL_BARGEIN
     bool "On-device (level-1) barge-in via AFE VAD"
     default y
 
+config AEC_STREAM_TO_CLOUD
+    bool "Start the P4 cloud streaming websocket (/ws/audio) at boot"
+    default n
+    help
+      P4 in the task list -- streaming ASR/TTS -- is explicitly scoped as
+      "本阶段之后": P0-P3 (AEC + on-device barge-in) validate entirely on
+      pre-recorded WAVs over the LAN and need no cloud audio stream. This was
+      on unconditionally regardless of phase.
+
+      Measured cost while idle: the connection to /ws/audio never stabilised,
+      cycling connected -> error -> disconnected -> reconnect roughly every
+      20-50s for hours, each cycle a fresh TLS-adjacent handshake and buffer
+      churn. Over that time free_internal (non-PSRAM) RAM sat at ~2.5KB with a
+      largest contiguous block of ~1152 bytes -- so small that HTTPS heartbeat
+      never once completed the TLS handshake and fell back to plaintext on
+      every single beat, and a five-hour silent hang (no crash, no reboot, no
+      serial output -- recoverable only by toggling EN) is consistent with some
+      later allocation needing more than that 1152-byte block and never getting
+      it.
+
+      Off by default until P4 actually starts. Re-enable then, and budget
+      internal RAM for it rather than letting it compete with the AFE, MQTT and
+      TLS for the same starved pool.
+
 config AEC_BARGEIN_ONSET_GRACE_MS
     int "Ignore barge-in for the first N ms of a TTS turn (AEC converge)"
     default 1500
