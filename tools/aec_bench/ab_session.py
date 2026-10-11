@@ -48,6 +48,40 @@ PI_WAV = "/tmp/ab_room.wav"
 LOG = "docs/logs/ab_session_results.jsonl"
 GATE = 150          # AEC_BARGEIN_MIN_RMS; a room above this is not quiet
 
+# 2026-10-11：之前 ab_room_{mode}.wav 是固定文件名，同一模式的下一轮会直接覆盖
+# 上一轮——8 轮批次里实际只留下了最后一个 alpha、最后一个 beta 的房间录音，
+# 其余全部丢了。现在每轮用时间戳区分，并把房间录音、上传的 wav、这一轮的完整
+# 元数据一起同步到 spark 上的专门归档目录，不再只靠本地 /tmp（会被清理）。
+ARCHIVE_HOST = "spark"
+ARCHIVE_DIR = "~/workspace/data/aec/ab_session_archive"
+
+
+def archive_run(run_id, room_wav, upload_paths, out):
+    """把这一轮的房间录音、上传文件、完整 out 字典同步到 spark，归档到独立目录。
+
+    本地文件不删——仍然可以当场查看；只是多了一份不会被覆盖、不会被 /tmp
+    清理掉的副本。失败了只打印一行，不让归档问题打断正在跑的测试。"""
+    import tempfile, shutil, os
+    tmp = tempfile.mkdtemp(prefix="ab_archive_")
+    try:
+        if room_wav and os.path.exists(room_wav):
+            shutil.copy(room_wav, os.path.join(tmp, "room.wav"))
+        for p in upload_paths:
+            if os.path.exists(p):
+                shutil.copy(p, os.path.join(tmp, os.path.basename(p)))
+        with open(os.path.join(tmp, "meta.json"), "w") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        r = subprocess.run(
+            ["ssh", ARCHIVE_HOST, f"mkdir -p {ARCHIVE_DIR}/{run_id}"],
+            capture_output=True, text=True, timeout=30)
+        subprocess.run(
+            ["scp", "-q", "-r", tmp + "/.", f"{ARCHIVE_HOST}:{ARCHIVE_DIR}/{run_id}/"],
+            capture_output=True, text=True, timeout=120)
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"  !! 归档到 spark 失败（不影响本轮结果）: {exc}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def sh(cmd, timeout=240):
     return subprocess.run(cmd, shell=True, capture_output=True,
@@ -135,7 +169,9 @@ def fetch(name, dest):
 def one_run(mode, clip, reference, quiet_ms, room_secs):
     """-> dict with the report, the transcription and the verdict."""
     beta = mode == "beta"
-    out = {"mode": mode, "clip": clip,
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = f"{ts}_{mode}"
+    out = {"mode": mode, "clip": clip, "run_id": run_id,
            "at": datetime.datetime.now().isoformat(timespec="seconds")}
 
     post({"action": "stop_audio"})
@@ -189,7 +225,8 @@ def one_run(mode, clip, reference, quiet_ms, room_secs):
     remain = room_secs - (time.time() - t_rec) + 4
     if remain > 0:
         time.sleep(remain)
-    sh(f"scp pi:{PI_WAV} ./ab_room_{mode}.wav", timeout=300)
+    room_wav = f"./ab_room_{run_id}.wav"
+    sh(f"scp pi:{PI_WAV} {room_wav}", timeout=300)
 
     new = [n for n in newest_uploads(6) if n not in before]
     paths = []
@@ -229,6 +266,8 @@ def one_run(mode, clip, reference, quiet_ms, room_secs):
         # inference that should be looked at, not automated away.
         out["beta_note"] = ("beta：两份上传应分别读出【人】与【机器人】；"
                             "若两份都读出人，说明麦克风通道也没有回声，需查播放是否真在进行")
+
+    archive_run(run_id, room_wav, paths, out)
     return out
 
 
@@ -250,6 +289,11 @@ def main():
     if not ref:
         print("拿不到基准转写，无法评分。停止。")
         return 1
+
+    session_ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sh(f"ssh {ARCHIVE_HOST} 'mkdir -p {ARCHIVE_DIR}/_sessions'")
+    sh(f"scp -q ./ab_reference.wav "
+       f"{ARCHIVE_HOST}:{ARCHIVE_DIR}/_sessions/{session_ts}_reference.wav", timeout=60)
 
     results = []
     for i in range(args.runs):
