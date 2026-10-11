@@ -204,3 +204,72 @@ for x in (d.get('devices') or d):
 **这个改写坑过一次**:看到 OTA 走 HTTP,就以为 TLS 故障和 OTA 无关。实际上 OTA 的
 **下载**不走 TLS,但 OTA 的**命令送达**走 MQTT,而 MQTT 走 TLS。
 详见 `docs/logs/2026-09-15-tls-alloc-failure-usb-path.md`。
+
+---
+
+## 8. 备用链路:WSL + usbipd
+
+**仅当 spark 不可用时才用**(`WORKING.md` 规则 7、`docs/OTA_RELEASE.md` 第 3 条)。
+
+### 最重要的前提:USB 线要插在 Windows 主机上
+
+`usbipd` 只能转发**已经连到 Windows 的**设备。设备接在 spark 上时,Windows 侧根本看
+不到它 —— 2026-09-15 实测 `usbipd list` 的输出里没有 `303a:1001`,因为线在 spark。
+
+**所以这不是一条可以并行使用的通路,而是"把线拔过去"的替代方案。** 同一时刻设备只能
+挂在一台主机上。
+
+```bash
+ssh wsl                       # 主机名 PC-20260130KUPG
+USBIPD="/mnt/c/Program Files/usbipd-win/usbipd.exe"
+$USBIPD list                  # 找 303a:1001,历史 busid 为 2-5
+```
+
+### 挂载步骤
+
+```bash
+$USBIPD bind   --busid 2-5    # 需要管理员权限,一次性,STATE 变为 Shared
+$USBIPD attach --wsl --busid 2-5
+ls -l /dev/ttyACM0            # archer 在 dialout 组,无需 sudo
+```
+
+之后 esptool / 串口读取的用法与第 1、2、5 节完全相同。
+
+### WSL 与 spark 的关键差异
+
+| | spark | WSL |
+|---|---|---|
+| esptool | IDF 5.5 工具环境自带 | 同(`~/esp-idf` 有完整源码树) |
+| **能否构建固件** | **不能**(只有工具环境,无源码树) | **能**(有 esp-idf + 本地 sdkconfig) |
+| USB 接入 | 直连 | 需 usbipd 从 Windows 转发 |
+| 链路稳定性 | 稳定 | Tailscale 链路会抖,**ssh 调用要带重试** |
+
+### 历史记录里的四个坑(`docs/AEC_INTEGRATION_LOG.md`)
+
+1. **`idf.py monitor` 在无 TTY 的 SSH 下不可用**。用 pyserial:
+   `Serial('/dev/ttyACM0',115200)`,再 `setDTR(False); setRTS(True); sleep .1; setRTS(False)`
+   复位进 app 后读取。本仓库的 `tools/serial_capture.py` 就是干这个的。
+2. **USB-Serial-JTAG 没有真正的 RTS 引脚**,`esptool --after hard_reset` 可能是空操作
+   —— 刷完芯片仍停在 stub 里,要自己拨线复位。
+   (注:2026-09-15 在 spark 上 `flash_id` 打印了 `Hard resetting via RTS pin...` 且
+   设备确实重启了,说明该机上有效。**两边行为可能不同,刷完务必确认设备真的起来了**,
+   别看到这行字就当成功。)
+3. **复位会让 USB-JTAG 重新枚举**,`/dev/ttyACM0` 会短暂消失 —— 重新打开要带重试,
+   必要时重新 `usbipd attach`。
+4. **Tailscale 到 wsl 的链路会抖**,历史上出现过连续 6–8 次 ssh 超时导致固件任务全部
+   阻塞。所有 ssh 调用都要能重试,不要在单次失败上做判断。
+
+### 一条需要澄清的历史警告
+
+`docs/aec/SUMMARY.md` 写过:
+
+> **编译仍需 WSL**:WiFi 凭据编译进二进制,在别处从干净仓库编译会产出空密码固件,
+> OTA 上去设备永久失联。
+
+**这条现在已经不成立,但前提是保留 NVS。** 设备后来加了 `wifi_set_remote` 命令、
+凭据落在 NVS(v33 即以 `remotewifi` 命名)。实证:本会话 v45–v54 共 10 次 OTA 用的
+全是 **CI 从干净仓库构建**的镜像,设备每次都正常重新联网。
+
+**但这条警告在一种情况下会复活:擦除 NVS。** 一旦擦了 NVS,CI 镜像里没有编译进去的
+凭据,设备就真的永久失联,只能靠 USB 重新灌。这也是第 5 节把"擦 nvs"列为需要明确
+授权的原因。
